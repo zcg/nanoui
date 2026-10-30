@@ -231,6 +231,13 @@ pub const GCS_CURSORPOS = 0x0080;
 pub const GCS_RESULTSTR = 0x0800;
 /// ISC_SHOWUICOMPOSITIONWINDOW: leave the IME's own windows to it.
 pub const ISC_SHOWUICOMPOSITIONWINDOW = 0x80000000;
+/// The ISC_* flags in WM_IME_SETCONTEXT's lParam say which of the IME's own
+/// windows the system would draw. An app that draws the composition itself
+/// clears ISC_SHOWUICOMPOSITIONWINDOW; one that does not must leave it, or the
+/// composition and candidate windows never appear at all.
+pub const ISC_SHOWUIGUIDELINE = 0x40000000;
+pub const ISC_SHOWUIALLCANDIDATEWINDOW = 0x0000000F;
+pub const ISC_SHOWUICANDIDATEWINDOW = 0x00000001;
 /// Reads a value from the registry: the system's light/dark preference lives
 /// under HKCU. `HKEY_CURRENT_USER` is 0x80000001; the rest are constants
 /// `RegGetValueW` needs.

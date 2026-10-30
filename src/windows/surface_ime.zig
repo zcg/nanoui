@@ -160,7 +160,14 @@ pub fn handle(self: *Surface, h: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) ?
         w.WM_IME_STARTCOMPOSITION => startComposition(self, h),
         w.WM_IME_COMPOSITION => composition(self, h, lp),
         w.WM_IME_ENDCOMPOSITION => endComposition(self, h),
-        w.WM_IME_SETCONTEXT => focusGained(self, h, wp),
+        // The ISC_* flags in lParam say which of the IME's own windows the
+        // system may draw, so lParam goes back as it came. (Microsoft Pinyin
+        // draws its candidate window through TSF and ignores this either way;
+        // an IME that still uses IMM32 needs it.)
+        w.WM_IME_SETCONTEXT => {
+            focusGained(self, h, wp);
+            return lp;
+        },
         w.WM_IME_NOTIFY => notify(self, h, wp),
         else => return null,
     }
