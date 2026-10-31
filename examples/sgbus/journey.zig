@@ -56,6 +56,11 @@ pub const Journey = struct {
     app: *App = undefined,
     /// OneMap's token, from the environment, held in memory only.
     token: ?[]const u8 = null,
+    /// The wall clock, for OneMap's date and time (it needs both), so it
+    /// is asked before any live board has answered too.
+    io: ?std.Io = null,
+    /// When OneMap was asked, epoch milliseconds.
+    om_asked_ms: f64 = 0,
     /// Show OneMap's documented sample answer instead of asking (a demo of
     /// the MRT views without a token; labelled as a sample on screen).
     sample: bool = false,
@@ -118,13 +123,12 @@ pub const Journey = struct {
             j.n_om = sample.len;
             j.om_state = .sample;
         } else if (j.token) |token| {
-            const date = s.live.date orelse return;
-            const now = s.live.clock() orelse return;
-            const t: u32 = @intFromFloat(now);
-            var tb: [8]u8 = undefined;
-            const time = std.fmt.bufPrint(&tb, "{d:0>2}:{d:0>2}:{d:0>2}", .{ t / 3600, t / 60 % 60, t % 60 }) catch return;
+            const io = j.io orelse return;
+            const ms: i64 = @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
+            const w = onemap.when(ms);
+            j.om_asked_ms = @floatFromInt(ms);
             var ub: [320]u8 = undefined;
-            const u = onemap.url(&ub, .{ .lat = s.here.lat, .lng = s.here.lng }, .{ .lat = p.at.lat, .lng = p.at.lng }, &date, time) catch return;
+            const u = onemap.url(&ub, .{ .lat = s.here.lat, .lng = s.here.lng }, .{ .lat = p.at.lat, .lng = p.at.lng }, &w.date, &w.time) catch return;
             j.om_state = .asking;
             nanoui.http.fetch(s.gpa, .{ .url = u, .headers = &.{.{ .name = "Authorization", .value = token }}, .timeout = 15 }, j, routed);
         }
@@ -141,6 +145,7 @@ pub const Journey = struct {
             j.om_state = .failed;
             return;
         }).len;
+        for (j.om[0..j.n_om]) |*it| it.fromAsking(j.om_asked_ms);
         j.om_state = if (j.n_om > 0) .ok else .failed;
     }
 
@@ -208,7 +213,7 @@ pub const Journey = struct {
         }
         if (j.usingOneMap()) for (j.om[0..j.n_om], 0..) |it, i| {
             if (n == out.len) break;
-            // OneMap's minutes already count its waits and walks.
+            // OneMap's minutes, from asking, count its waits and walks.
             const mins = it.seconds / 60;
             out[n] = .{ .om = true, .i = @intCast(i), .score = mins + 5 * @as(f64, @floatFromInt(it.transfers)) + 0.5 * raptor.walkMin(it.walk_m / 1.3) };
             n += 1;

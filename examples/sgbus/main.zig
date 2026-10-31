@@ -286,6 +286,7 @@ pub fn main(init: std.process.Init) !void {
     s.journey.app = &s;
     // At run time only: never stored, printed or bundled.
     s.journey.token = init.environ_map.get("ONEMAP_TOKEN");
+    s.journey.io = init.io;
     s.journey.sample = init.environ_map.get("SGBUS_ONEMAP_SAMPLE") != null;
     // SGBUS_FRESH: start with no stars, as on a first launch (for a
     // scripted playthrough that stars a stop itself).

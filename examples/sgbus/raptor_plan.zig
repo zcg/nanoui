@@ -26,6 +26,12 @@ const Label = struct {
 
 /// Up to `out.len` ways from `from` to `to`, best first.
 pub fn plan(d: *const data.Data, gpa: std.mem.Allocator, from: Coord, to: Coord, now: r.Now, out: []r.Option) ![]r.Option {
+    const got = try planWithin(d, gpa, from, to, now, out, r.walk_radius);
+    if (got.len > 0) return got;
+    return planWithin(d, gpa, from, to, now, out, r.wide_walk_radius);
+}
+
+fn planWithin(d: *const data.Data, gpa: std.mem.Allocator, from: Coord, to: Coord, now: r.Now, out: []r.Option, radius: f64) ![]r.Option {
     const n = d.stops.len;
     var pace = try r.Pace.init(gpa, d, now.obs);
     defer pace.deinit(gpa);
@@ -46,7 +52,7 @@ pub fn plan(d: *const data.Data, gpa: std.mem.Allocator, from: Coord, to: Coord,
 
     var buf: [128]data.Near = undefined;
     var rbuf: [32]data.Near = undefined;
-    for ([2][]data.Near{ d.near(from, r.walk_radius, &buf), d.nearRail(from, r.rail_radius, &rbuf) }) |list| for (list) |s| {
+    for ([2][]data.Near{ d.near(from, radius, &buf), d.nearRail(from, @max(r.rail_radius, radius), &rbuf) }) |list| for (list) |s| {
         labels[0][s.stop] = .{ .t = r.walkMin(s.m) + inside(d, s.stop, true), .walk = s.m, .m = s.m, .kind = .origin };
         marked[s.stop] = true;
     };
@@ -124,7 +130,7 @@ pub fn plan(d: *const data.Data, gpa: std.mem.Allocator, from: Coord, to: Coord,
             };
         }
     }
-    return choose(d, gpa, labels, to, now, out);
+    return choose(d, gpa, labels, to, now, out, radius);
 }
 
 pub fn hasTrain(d: *const data.Data, o: r.Option) bool {
@@ -145,12 +151,12 @@ const change_penalty: f64 = 5.0;
 const walk_penalty: f64 = 0.5;
 
 /// Every way to a stop near `to`, then the Pareto set, tagged and ranked.
-fn choose(d: *const data.Data, gpa: std.mem.Allocator, labels: [r.rounds + 1][]Label, to: Coord, now: r.Now, out: []r.Option) ![]r.Option {
+fn choose(d: *const data.Data, gpa: std.mem.Allocator, labels: [r.rounds + 1][]Label, to: Coord, now: r.Now, out: []r.Option, radius: f64) ![]r.Option {
     var buf: [128]data.Near = undefined;
     var rbuf: [32]data.Near = undefined;
     var all: std.ArrayList(r.Option) = .empty;
     defer all.deinit(gpa);
-    for ([2][]data.Near{ d.near(to, r.walk_radius, &buf), d.nearRail(to, r.rail_radius, &rbuf) }) |list| for (list) |e| for (1..r.rounds + 1) |k| {
+    for ([2][]data.Near{ d.near(to, radius, &buf), d.nearRail(to, @max(r.rail_radius, radius), &rbuf) }) |list| for (list) |e| for (1..r.rounds + 1) |k| {
         if (labels[k][e.stop].kind == .none) continue;
         var o = trace(d, labels, k, e.stop, now) orelse continue;
         // The fourth ride is for bus, train, train, bus: not four buses.
@@ -278,7 +284,9 @@ fn trace(d: *const data.Data, labels: [r.rounds + 1][]Label, k0: usize, stop: u1
             buses = true;
             if (tap_in) |a| o.km += r.rail.shortestKm(d, a, tap_out);
             tap_in = null;
-            for (l.from..l.to) |p| o.km += data.meters(d.stops[st[p]].at, d.stops[st[p + 1]].at) / 1000;
+            // Bus fares go by road distance: stop to stop in straight lines, times
+            // `r.road_factor` (fitted to 71 of OneMap's bus legs, journey/eval.md).
+            for (l.from..l.to) |p| o.km += data.meters(d.stops[st[p]].at, d.stops[st[p + 1]].at) / 1000 * r.road_factor;
         }
     }
     if (tap_in) |a| o.km += r.rail.shortestKm(d, a, tap_out);

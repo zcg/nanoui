@@ -43,7 +43,11 @@ pub const Leg = struct {
 };
 
 pub const Itinerary = struct {
+    /// Riding, walking and waiting from its first leg; the app makes it
+    /// door to door (from asking) with `fromAsking`.
     seconds: f64 = 0,
+    /// When it gets there, epoch milliseconds (0 if not given).
+    end_ms: f64 = 0,
     walk_m: f64 = 0,
     transfers: u32 = 0,
     fare: [8]u8 = undefined,
@@ -51,10 +55,52 @@ pub const Itinerary = struct {
     legs: [10]Leg = undefined,
     n: u8 = 0,
 
+    /// Whether it rides a bus or train at all.
+    pub fn rides(it: *const Itinerary) bool {
+        for (it.legs[0..it.n]) |l| if (l.mode != .walk) return true;
+        return false;
+    }
+
     pub fn fareOf(it: *const Itinerary) []const u8 {
         return it.fare[0..it.fare_len];
     }
+
+    /// Door to door from asking at `asked_ms`: its first leg can start a
+    /// few minutes later (a train or bus not yet due), which `duration`
+    /// leaves out.
+    pub fn fromAsking(it: *Itinerary, asked_ms: f64) void {
+        if (it.end_ms > asked_ms) it.seconds = @max(it.seconds, (it.end_ms - asked_ms) / 1000);
+    }
 };
+
+/// A moment as OneMap's request wants it, in Singapore time (UTC+8).
+pub const When = struct {
+    /// MM-DD-YYYY.
+    date: [10]u8,
+    /// HH:MM:SS.
+    time: [8]u8,
+};
+
+/// `epoch_ms` (Unix milliseconds) as a Singapore date and time.
+pub fn when(epoch_ms: i64) When {
+    const s = @divFloor(epoch_ms, 1000) + 8 * 3600;
+    const days = @divFloor(s, 86400);
+    const t: u32 = @intCast(@mod(s, 86400));
+    // Days to a civil date (Howard Hinnant's algorithm).
+    const z = days + 719468;
+    const era = @divFloor(z, 146097);
+    const doe: i64 = z - era * 146097;
+    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
+    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+    const mp = @divFloor(5 * doy + 2, 153);
+    const d: u32 = @intCast(doy - @divFloor(153 * mp + 2, 5) + 1);
+    const m: u32 = @intCast(if (mp < 10) mp + 3 else mp - 9);
+    const y: u32 = @intCast(yoe + era * 400 + @as(i64, if (m <= 2) 1 else 0));
+    var w: When = undefined;
+    _ = std.fmt.bufPrint(&w.date, "{d:0>2}-{d:0>2}-{d:0>4}", .{ m, d, y }) catch unreachable;
+    _ = std.fmt.bufPrint(&w.time, "{d:0>2}:{d:0>2}:{d:0>2}", .{ t / 3600, t / 60 % 60, t % 60 }) catch unreachable;
+    return w;
+}
 
 /// The request's URL, for leaving at `date` (MM-DD-YYYY) `time` (HH:MM:SS).
 pub fn url(buf: []u8, from: Coord, to: Coord, date: []const u8, time: []const u8) ![]const u8 {
@@ -70,8 +116,10 @@ pub fn parse(gpa: std.mem.Allocator, body: []const u8, out: []Itinerary) ![]Itin
     var n: usize = 0;
     for (list) |v| {
         if (n == out.len) break;
-        var it: Itinerary = .{ .seconds = num(v, "duration"), .walk_m = num(v, "walkDistance"), .transfers = @intFromFloat(num(v, "transfers")) };
-        copy(&it.fare, &it.fare_len, str(v, "fare"));
+        var it: Itinerary = .{ .seconds = num(v, "duration"), .end_ms = num(v, "endTime"), .walk_m = num(v, "walkDistance"), .transfers = @intFromFloat(@max(0, num(v, "transfers"))) };
+        // A fare only when it is one: OneMap says "info unavailable" for some.
+        const fare = str(v, "fare");
+        if (std.fmt.parseFloat(f64, fare)) |_| copy(&it.fare, &it.fare_len, fare) else |_| {}
         const legs = (v.object.get("legs") orelse continue).array.items;
         for (legs) |l| {
             if (it.n == it.legs.len) break;
@@ -87,6 +135,9 @@ pub fn parse(gpa: std.mem.Allocator, body: []const u8, out: []Itinerary) ![]Itin
             it.legs[it.n] = leg;
             it.n += 1;
         }
+        // After the last train OneMap answers with a walk the whole way
+        // (13 km, 160 minutes): not a way by bus or train.
+        if (!it.rides()) continue;
         out[n] = it;
         n += 1;
     }
@@ -148,4 +199,35 @@ test "parse OneMap's documented sample" {
     try std.testing.expectEqualStrings("HARBOURFRONT MRT STATION", it.legs[1].to.nameOf());
     try std.testing.expectEqualStrings("CC", it.legs[2].routeOf());
     try std.testing.expect(it.legs[2].to.at == null);
+}
+
+test "when: Singapore date and time for OneMap" {
+    // 2026-11-03 02:00:00 UTC is 10:00 in Singapore.
+    const w = when(1793671200000);
+    try std.testing.expectEqualStrings("11-03-2026", &w.date);
+    try std.testing.expectEqualStrings("10:00:00", &w.time);
+    // 16:30 UTC on 31 Dec is past midnight in Singapore.
+    const n = when(1798734600000);
+    try std.testing.expectEqualStrings("01-01-2027", &n.date);
+    try std.testing.expectEqualStrings("00:30:00", &n.time);
+}
+
+test "a fare that is not one is left out, and minutes count from asking" {
+    const body =
+        \\{"plan":{"itineraries":[{"duration":1200,"endTime":1793672700000,"walkDistance":300.5,"transfers":0,"fare":"info unavailable","legs":[{"mode":"BUS","route":"15","duration":1200,"distance":5000}]}]}}
+    ;
+    var out: [3]Itinerary = undefined;
+    const got = try parse(std.testing.allocator, body, &out);
+    try std.testing.expectEqual(0, got[0].fare_len);
+    // Asked at 10:00, there at 10:25: 25 minutes, not the 20 it rides.
+    got[0].fromAsking(1793671200000);
+    try std.testing.expectEqual(1500, got[0].seconds);
+}
+
+test "a walk the whole way is not a OneMap way" {
+    const body =
+        \\{"plan":{"itineraries":[{"duration":9810,"walkDistance":13624,"transfers":0,"fare":"0.00","legs":[{"mode":"WALK","route":"","duration":9810,"distance":13624}]}]}}
+    ;
+    var out: [3]Itinerary = undefined;
+    try std.testing.expectEqual(0, (try parse(std.testing.allocator, body, &out)).len);
 }

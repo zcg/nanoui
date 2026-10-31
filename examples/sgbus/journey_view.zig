@@ -99,7 +99,8 @@ fn options(s: *App, c: *ui.Context) void {
     }
     para(c, switch (j.om_state) {
         .asking => "Asking OneMap for bus and MRT ways...",
-        .failed => c.print("OneMap answered {d}, so these are only ours, planned on this phone. Ride times are estimates.", .{j.om_status}),
+        // 200 with only a walk, or 404: no bus or train runs there now.
+        .failed => if (j.om_status == 200 or j.om_status == 404) "OneMap has no bus or train way for this right now, so these are only ours. Ride times are estimates." else c.print("OneMap answered {d}, so these are only ours, planned on this phone. Ride times are estimates.", .{j.om_status}),
         else => if (j.token == null) "Bus and train, planned on this phone from LTA's stop and station lists. Ride times are estimates, sharpened by live buses." else "Ranked by arrival, with 5 min per change and half a minute per minute walked. Ride times are estimates.",
     });
 }

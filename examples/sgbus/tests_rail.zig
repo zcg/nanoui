@@ -138,3 +138,19 @@ test "a train fare counts the shortest track, as SimplyGo's eGuide does" {
     try std.testing.expect(km > 2 and km < 4);
     try std.testing.expectApproxEqAbs(km, raptor.rail.shortestKm(d, b.?, a.?), 0.01);
 }
+
+test "OneMap cross-check: a far stop, 660M, and bus fares by road" {
+    const gpa = std.testing.allocator;
+    const d = try data.Data.load(gpa);
+    defer d.deinit(gpa);
+    var out: [5]raptor.Option = undefined;
+    // Ngee Ann Poly's nearest stop is 488 m off: still a way (bus 67).
+    const np = try raptor.plan(d, gpa, c(1.381921, 103.747901), c(1.332481, 103.773306), .{ .clock = 10 * 3600 }, &out);
+    try std.testing.expect(np.len > 0);
+    // City Direct by its digits: 660M too, not just 660.
+    try std.testing.expect(raptor.cityDirect("660M") and raptor.cityDirect("660") and !raptor.cityDirect("66"));
+    // Clementi Ave 1 to Hwa Chong by 154: OneMap's $1.68 (road km, not
+    // the straight line's $1.59).
+    const hci = try raptor.plan(d, gpa, c(1.310045, 103.769124), c(1.324948, 103.805704), .{ .clock = 10 * 3600 }, &out);
+    try std.testing.expectEqual(@as(u16, 168), fastest(hci).fare.?);
+}

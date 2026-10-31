@@ -23,6 +23,12 @@ const Coord = @import("nanoui").map.Coord;
 pub const walk_radius = 450;
 pub const transfer_radius = 300;
 pub const rail_radius = 800;
+/// When nothing is within `walk_radius` of either end (a campus, a park):
+/// try again walking up to this far, as OneMap does.
+pub const wide_walk_radius = 1000;
+/// Road km over straight stop-to-stop km for a bus ride (median of 71
+/// OneMap bus legs: 1.08), for distance fares.
+pub const road_factor: f64 = 1.08;
 /// Bus, train, train, bus is four.
 pub const rounds = 4;
 const dwell_min = 0.33;
@@ -106,9 +112,12 @@ pub fn express(no: []const u8) bool {
     return n >= 500 and n < 600;
 }
 
-/// City Direct (6xx in this data: 646 to 684): its own fares, rush hours only.
+/// City Direct (6xx in this data: 646 to 684, and variants such as 660M):
+/// its own fares, rush hours only.
 pub fn cityDirect(no: []const u8) bool {
-    const n = std.fmt.parseInt(u16, no, 10) catch return false;
+    var k: usize = 0;
+    while (k < no.len and std.ascii.isDigit(no[k])) k += 1;
+    const n = std.fmt.parseInt(u16, no[0..k], 10) catch return false;
     return n >= 600 and n < 700;
 }
 
