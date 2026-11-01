@@ -21,8 +21,9 @@ pub const pages = [_][2][]const u8{
     .{ "Glass", "sparkles" },
     .{ "Motion", "wand.and.stars" },
     .{ "Kit", "square.grid.2x2" },
+    .{ "Windows", "macwindow" },
 };
-const tiles = [pages.len]u24{ 0x0a84ff, 0x30d158, 0xff9f0a, 0x5e5ce6, 0x64d2ff, 0xff375f, 0xbf5af2 };
+const tiles = [pages.len]u24{ 0x0a84ff, 0x30d158, 0xff9f0a, 0x5e5ce6, 0x64d2ff, 0xff375f, 0xbf5af2, 0x8e8e93 };
 /// A line under each page's name.
 const blurbs = [pages.len][]const u8{
     "Buttons, toggles, sliders, fields",
@@ -32,10 +33,11 @@ const blurbs = [pages.len][]const u8{
     "Liquid Glass bars, tabs, toasts",
     "Springs, staggers, shared elements",
     "Every nanoui.kit component",
+    "Window options, on Windows",
 };
 /// The chips, and which of them each page is under.
 const chips = [_][]const u8{ "All", "Widgets", "Effects", "Text" };
-const chip_of = [pages.len]usize{ 1, 1, 3, 1, 2, 2, 1 };
+const chip_of = [pages.len]usize{ 1, 1, 3, 1, 2, 2, 1, 1 };
 
 /// The phone's spacing and motion.
 const gutter = 24;
