@@ -124,6 +124,7 @@ pub const Window = struct {
             _ = objc.msg(objc.BOOL, nswindow, "setFrameAutosaveName:", .{objc.nsString(name)});
         }
         if (options.always_on_top or options.floating) self.setAlwaysOnTop(true);
+        if (options.opacity < 1) self.setOpacity(options.opacity);
         if (!app.flags.hidden and options.visible) objc.msg(void, nswindow, "makeKeyAndOrderFront:", .{@as(?objc.Object, null)});
         if (app.debug) self.logFrame();
         return self;
@@ -202,6 +203,19 @@ pub const Window = struct {
     /// Keeps the window above other apps' windows.
     pub fn setAlwaysOnTop(self: *Window, on: bool) void {
         objc.msg(void, self.nswindow, "setLevel:", .{@as(objc.NSInteger, if (on) 3 else 0)}); // NSFloatingWindowLevel
+    }
+
+    /// The window's opacity, 0 to 1 (NSWindow's alpha value).
+    pub fn setOpacity(self: *Window, opacity: f64) void {
+        objc.msg(void, self.nswindow, "setAlphaValue:", .{std.math.clamp(opacity, 0, 1)});
+    }
+
+    /// The visible frame of the screen the window is on, in points: the menu
+    /// bar and the Dock left out, so it is the room there is for a window.
+    pub fn monitorSize(self: *Window) [2]f64 {
+        const screen = objc.msg(?objc.Object, self.nswindow, "screen", .{}) orelse objc.msg(?objc.Object, objc.class("NSScreen"), "mainScreen", .{}) orelse return .{ 0, 0 };
+        const f = objc.msg(objc.CGRect, screen, "visibleFrame", .{});
+        return .{ f.size.width, f.size.height };
     }
 
     pub fn isFullScreen(self: *Window) bool {

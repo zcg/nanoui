@@ -81,6 +81,16 @@ pub const objc = if (mac or builtin.os.tag == .ios) @import("objc.zig") else str
 pub const ui = @import("ui/ui.zig");
 /// HTTP requests answered on the main thread (http.zig).
 pub const http = @import("http.zig");
+/// Haptic taps (iOS; nothing elsewhere).
+pub const haptics = @import("basics/haptics.zig");
+/// The device's location (iOS, Core Location).
+pub const location = @import("basics/location.zig");
+/// Small values kept between launches (NSUserDefaults on Apple platforms).
+pub const kv = @import("basics/kv.zig");
+/// A map: MapKit under the UI on iOS, a placeholder elsewhere.
+pub const map = @import("basics/map.zig");
+/// Walking directions (iOS, MapKit's MKDirections).
+pub const directions = @import("basics/directions.zig");
 /// Components after GPUI Kit: buttons, overlays, tabs, forms, toasts.
 pub const kit = @import("kit/kit.zig");
 pub const tsgen = @import("tsgen.zig");
@@ -132,6 +142,11 @@ test {
     _ = @import("menu_types.zig");
     _ = @import("update.zig");
     _ = @import("http.zig");
+    _ = haptics;
+    _ = location;
+    _ = map;
+    _ = directions;
+    _ = kv;
     // The updater is for desktop apps; iOS updates through the App Store.
     if (builtin.os.tag != .ios) _ = @import("update_portable.zig");
     if (is_android) {
@@ -145,10 +160,23 @@ test {
         return;
     }
     if (!mac) {
-        inline for (.{ plat.app, plat.window, plat.menu, plat.dialog, plat.desktop, plat.fdwatch, }) |m| std.testing.refAllDecls(m);
+        inline for (.{
+            plat.app,
+            plat.window,
+            plat.menu,
+            plat.dialog,
+            plat.desktop,
+            plat.fdwatch,
+        }) |m| std.testing.refAllDecls(m);
         if (builtin.os.tag == .windows) {
             _ = @import("windows/d3d.zig");
             _ = @import("windows/tests_surface.zig");
+            // The window's own: styles, sizes, the close veto, the timers.
+            _ = @import("windows/tests_window.zig");
+            // The input method: its own tests, and the file itself for the
+            // decode/mapping units.
+            _ = @import("windows/ime.zig");
+            _ = @import("windows/tests_ime.zig");
         }
         return;
     }

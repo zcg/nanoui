@@ -5,9 +5,9 @@ pub const ios = @import("tools/ios/bundle.zig");
 /// Android APKs, likewise: `@import("nanoui").android.apk(b, lib, .{ .name = "Notes", .id = "com.example.notes" })`.
 pub const android = @import("tools/android/apk.zig");
 
-const examples = [_][]const u8{ "hello", "counter", "gallery" };
+const examples = [_][]const u8{ "hello", "counter", "gallery", "duo", "board", "basics", "map", "turn", "access", "todo", "sgbus" };
 const frameworks = [_][]const u8{ "AppKit", "WebKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO", "UniformTypeIdentifiers", "CoreVideo" };
-const ios_frameworks = [_][]const u8{ "UIKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO", "UniformTypeIdentifiers", "CoreVideo" };
+const ios_frameworks = [_][]const u8{ "UIKit", "CoreLocation", "MapKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO", "UniformTypeIdentifiers", "CoreVideo" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -51,6 +51,12 @@ pub fn build(b: *std.Build) void {
         // The NDK's libraries; OpenGL ES is loaded with dlopen.
         if (android.Sdk.find(b)) |sdk| if (sdk.libDir(b, target.result)) |dir| nanoui.addLibraryPath(.{ .cwd_relative = dir });
         for ([_][]const u8{ "android", "log", "EGL" }) |l| nanoui.linkSystemLibrary(l, .{});
+    }
+    if (os == .windows) {
+        // The D3D11 renderer (`ui/d3d11.zig`): d3d11 and dxgi are the
+        // system's, and d3dcompiler_47 turns the HLSL into shaders at
+        // startup (it ships with Windows and every DirectX runtime).
+        for ([_][]const u8{ "d3d11", "dxgi", "d3dcompiler_47" }) |l| nanoui.linkSystemLibrary(l, .{});
     }
     // Elsewhere GTK is loaded when the app starts (dlopen): nothing to link.
     // HTTP there is http-zig's (nanoui.http), fetched only for those targets.
@@ -122,7 +128,23 @@ pub fn build(b: *std.Build) void {
     if (target.result.abi.isAndroid()) if (android.Sdk.find(b)) |sdk| {
         _ = android.linkNdk(b, tests, sdk);
     };
-    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    // The accessibility demo, as VoiceOver reads it.
+    if (!target.result.abi.isAndroid()) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/access/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = nanoui }},
+    }) })).step);
+    // The SG bus example's planner, on its real stop lists (prints what it plans).
+    const sg_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/sgbus/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = nanoui }},
+    }) });
+    b.step("test-sgbus", "Test the SG bus example's journey planner").dependOn(&b.addRunArtifact(sg_tests).step);
     // The tests as a program, for another machine (Linux in a container).
     const test_bin = b.addInstallArtifact(tests, .{ .dest_sub_path = if (os == .windows) "nanoui-tests.exe" else "nanoui-tests" });
     b.step("test-bin", "Install the unit tests as zig-out/bin/nanoui-tests").dependOn(&test_bin.step);
@@ -160,7 +182,11 @@ fn addIosExample(b: *std.Build, name: []const u8, target: std.Build.ResolvedTarg
         }),
     });
     const title = b.fmt("{c}{s}", .{ std.ascii.toUpper(name[0]), name[1..] });
-    const opts: ios.Options = .{ .name = title, .id = b.fmt("dev.nanoui.{s}", .{name}) };
+    const opts: ios.Options = .{
+        .name = title,
+        .id = b.fmt("dev.nanoui.{s}", .{name}),
+        .location_usage = if (std.mem.eql(u8, name, "basics") or std.mem.eql(u8, name, "map") or std.mem.eql(u8, name, "sgbus")) "The example shows where you are." else null,
+    };
     const bundle = ios.app(b, exe, opts);
     b.getInstallStep().dependOn(&b.addInstallDirectory(.{ .source_dir = bundle, .install_dir = .prefix, .install_subdir = b.fmt("ios/{s}.app", .{title}) }).step);
     const step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s} example in the booted Simulator", .{name}));

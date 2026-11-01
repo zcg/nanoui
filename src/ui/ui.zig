@@ -52,6 +52,7 @@ pub const clock = @import("clock.zig");
 pub const png = @import("png.zig");
 
 pub const Point = types.Point;
+pub const Face = types.Face;
 pub const Fade = types.Fade;
 pub const Size = types.Size;
 pub const Rect = types.Rect;
@@ -65,6 +66,14 @@ pub const Truncate = types.Truncate;
 pub const Shadow = types.Shadow;
 pub const Glass = types.Glass;
 pub const Weight = types.Weight;
+/// Foldables: posture, hinge, fold band and occlusions (`Context.device`).
+pub const device = @import("device.zig");
+pub const Device = device.Device;
+pub const Posture = device.Posture;
+/// Two panes that keep clear of a fold (`panes.zig`).
+pub const panes = @import("panes.zig").panes;
+pub const Panes = @import("panes.zig").Panes;
+pub const PanesOptions = @import("panes.zig").Options;
 
 pub const key = widgets.key;
 pub const keyInt = widgets.keyInt;
@@ -78,6 +87,7 @@ pub const spacer = widgets.spacer;
 pub const divider = widgets.divider;
 pub const image = widgets.image;
 pub const texture = widgets.texture;
+pub const hole = widgets.hole;
 /// A box to draw lines, triangles, polygons and circles in (draw.zig).
 pub const canvas = @import("draw.zig").canvas;
 pub const Canvas = @import("draw.zig").Canvas;
@@ -163,17 +173,22 @@ test {
     _ = @import("tests_shadow_x.zig");
     _ = @import("tests_text_style.zig");
     _ = @import("tests_text_extras.zig");
+    _ = @import("tests_turn.zig");
     _ = @import("tests_settle.zig");
     _ = types;
+    _ = device;
+    _ = @import("panes.zig");
     _ = @import("layout.zig");
     _ = textfield;
     _ = @import("tests.zig");
     _ = @import("tests_keymap.zig");
     _ = @import("tests_multiline.zig");
     _ = @import("tests_texture.zig");
+    _ = @import("tests_hole.zig");
     _ = @import("tests_canvas.zig");
     _ = @import("triangulate.zig");
     _ = @import("tests_motion_more.zig");
+    _ = @import("tests_roll.zig");
     _ = @import("tests_layer.zig");
     _ = @import("tests_safe_area.zig");
     _ = @import("motion/motion.zig");
@@ -204,6 +219,7 @@ test {
     _ = @import("tests_svg.zig");
     _ = @import("tests_truncate.zig");
     if (@import("dwrite.zig").enabled) _ = @import("tests_dwrite.zig");
+    if (@import("builtin").os.tag == .windows) _ = @import("tests_d3d11.zig");
     _ = @import("icons.zig");
     _ = keys;
     _ = @import("tests_textedit.zig");
