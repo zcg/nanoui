@@ -69,9 +69,9 @@ pub fn Options(comptime Window: type) type {
         /// Independent of `title_bar`, which is about what the title bar looks
         /// like when there is one.
         decorations: bool = true,
-        /// Window opacity, 0 to 1. 1 is opaque and the normal path. Windows
-        /// only for now. Below 1 the window is translucent, and that costs the
-        /// GPU renderer there: `SetLayeredWindowAttributes` has no effect on a
+        /// Window opacity, 0 to 1. 1 is opaque and the normal path. macOS
+        /// and GTK set the window's alpha; on Windows, below 1 the window is
+        /// translucent, and that costs the GPU renderer there: `SetLayeredWindowAttributes` has no effect on a
         /// DXGI flip-model swap chain, so the frame is drawn by GDI while the
         /// window is translucent and the GPU is picked up again at 1. One CPU
         /// copy per frame while translucent is the price; see
