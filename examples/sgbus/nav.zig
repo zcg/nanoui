@@ -85,6 +85,7 @@ pub const Nav = struct {
         nv.dest_len = @intCast(@min(name.len, nv.dest_buf.len));
         @memcpy(nv.dest_buf[0..nv.dest_len], name[0..nv.dest_len]);
         nv.waiting = 0;
+        if (s.live.jump) |j| s.live.setClock(j);
         for (0..t.n + 1) |i| {
             const e = nv.ends(i);
             if (data.meters(e[0], e[1]) < 20) continue;
