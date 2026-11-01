@@ -59,7 +59,7 @@ pub fn panel(s: *App, c: *ui.Context, r: Route) void {
         cards.badge(c, svc.no);
         const t = ui.div(c).column().grow();
         ui.text(c, c.print("to {s}", .{last.name}), .{ .size = 28, .weight = .semibold, .color = cards.ink, .wrap = true });
-        ui.text(c, c.print("from {s} ({s})", .{ st.name, st.code }), .{ .size = 13, .color = cards.gray, .truncate = .ellipsis });
+        ui.text(c, c.print("from {s} ({s})", .{ st.name, st.code }), .{ .size = 13, .color = cards.gray, .wrap = true });
         t.end();
     }
     const b = s.live.want(st.code);

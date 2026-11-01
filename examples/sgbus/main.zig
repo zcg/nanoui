@@ -15,6 +15,8 @@ const journey = @import("journey.zig");
 const about = @import("about.zig");
 const omv = @import("onemap_view.zig");
 const onboarding = @import("onboarding.zig");
+const nav = @import("nav.zig");
+const nav_view = @import("nav_view.zig");
 
 pub const Tab = enum { nearby, starred, journey, about };
 
@@ -46,10 +48,15 @@ pub const App = struct {
     welcome: ?onboarding.Onboarding = null,
     /// Core Location, once you've said yes (or on a later launch).
     where: ?*nanoui.location.Location = null,
+    /// Turn by turn, after Go.
+    nav: nav.Nav = .{},
+    /// Two panes this frame (a Duo opened, or a wide window).
+    two: bool = false,
 
     fn view(s: *App, c: *ui.Context) void {
         s.live.frame(c.time);
         s.located();
+        s.nav.update(s.here);
         if (s.m.takeTap()) |id| if (id < s.d.n_bus) s.choose(@intCast(id));
         if (s.refreshing and s.live.answers != s.answers_seen) {
             s.refreshing = false;
@@ -64,6 +71,7 @@ pub const App = struct {
         const root = ui.div(c).column().sizeFull().bg(cards.ground);
         defer root.end();
         const two = c.device.split() != .none or c.size.w >= 600;
+        s.two = two;
         if (two) {
             const p = ui.panes(c, .{ .ratio = 0.5 });
             s.mapView(c, .{});
@@ -73,7 +81,7 @@ pub const App = struct {
         }
         const sa = c.safe_area;
         if (s.showMap()) {
-            const top = ui.div(c).wFull().h(@round(c.size.h * 0.36));
+            const top = ui.div(c).wFull().h(@round(c.size.h * @as(f32, if (s.nav.on) 0.44 else 0.36)));
             s.mapView(c, sa);
             top.end();
             s.content(c, .{ .left = sa.left, .right = sa.right, .bottom = sa.bottom });
@@ -83,7 +91,7 @@ pub const App = struct {
     fn showMap(s: *const App) bool {
         return switch (s.tab) {
             .nearby, .starred => true,
-            .journey => s.journey.trip() != null or s.journey.omTrip() != null,
+            .journey => s.nav.on or s.journey.trip() != null or s.journey.omTrip() != null,
             .about => false,
         };
     }
@@ -91,7 +99,11 @@ pub const App = struct {
     fn mapView(s: *App, c: *ui.Context, sa: ui.Edges) void {
         var pins: [12]map.Pin = undefined;
         var opts: map.Options = .{ .user = true, .pins = &.{} };
-        if (s.route) |r| {
+        var lines: [12]map.Line = undefined;
+        if (s.nav.on and s.route == null) {
+            opts = nav_view.mapOpts(s, &pins, &lines);
+            s.line_for = null;
+        } else if (s.route) |r| {
             s.setLine(r.svc, r.dir);
             opts.pins = route.pins(s, c, r, &pins);
             opts.line = .{ .points = s.line.items, .color = cards.green };
@@ -107,7 +119,7 @@ pub const App = struct {
             s.journey.line(t, &s.line);
             s.line_for = null;
             opts.pins = s.journey.pins(t, &pins);
-            opts.line = .{ .points = s.line.items, .color = s.journey.lineColor(t) };
+            opts.lines = s.journey.lines(t, &s.line, &lines);
             opts.camera = s.journey.camera();
         } else {
             const list = if (s.tab == .starred) s.stars.items else s.near;
@@ -135,18 +147,57 @@ pub const App = struct {
         defer host.end();
         const box = c.rects.get(host.id()) orelse ui.Rect{ .w = c.size.w, .h = c.size.h };
         {
-            const list = ui.div(c).column().sizeFull().scrollY().gap(12).pt(sa.top + 16).pb(sa.bottom + 96).pl(sa.left + 16).pr(sa.right + 16);
+            // Room on the right for the edge rail on two panes.
+            const list = ui.div(c).column().sizeFull().scrollY().gap(12).pt(sa.top + 16).pb(sa.bottom + 96).pl(sa.left + 16).pr(sa.right + 16 + @as(f32, if (s.two) rail_w + 8 else 0));
             defer list.end();
             if (s.pull.update(c, list.id())) s.refresh();
             if (s.pull.distance > 4) ui.text(c, if (s.pull.armed) "Let go to refresh" else "Pull to refresh", .{ .size = 13, .color = cards.gray });
-            if (s.route) |r| route.panel(s, c, r) else switch (s.tab) {
+            if (s.nav.on and s.route == null) nav_view.view(s, c, s.two) else if (s.route) |r| route.panel(s, c, r) else switch (s.tab) {
                 .nearby => s.stopList(c, "Nearby", s.near),
                 .starred => s.stopList(c, "Starred", s.stars.items),
                 .journey => journey.view(s, c),
                 .about => about.view(c),
             }
         }
-        s.tabBar(c, box, sa);
+        // Folded, a trip's Go and turn by turn take the bar's place: it
+        // would cover the Go button and the fare.
+        const trip_open = s.tab == .journey and s.route == null and (s.nav.on or s.journey.trip() != null);
+        if (s.two) s.rail(c, box, sa) else if (!trip_open) s.tabBar(c, box, sa) else if (!s.nav.on) s.goBar(c, box, sa);
+    }
+
+    const rail_w: f32 = 72;
+    const tabs = [_]struct { Tab, []const u8 }{ .{ .nearby, "Nearby" }, .{ .starred, "Starred" }, .{ .journey, "Journey" }, .{ .about, "About" } };
+
+    /// On two panes: the tabs as a rail on the outer edge, not a bar
+    /// stretched along the bottom. It floats, so it is the glass.
+    fn rail(s: *App, c: *ui.Context, box: ui.Rect, sa: ui.Edges) void {
+        const h: f32 = 4 * 52 + 12;
+        const bar = ui.div(c).absolute().offset(box.w - rail_w - 8 - sa.right, @max(sa.top + 8, (box.h - h) / 2)).column().w(rail_w).h(h).p(6).gap(0).rounded(26).glass(.{}).shadowMd();
+        defer bar.end();
+        for (tabs) |t| {
+            c.next_key = t[1];
+            const on = s.tab == t[0] and s.route == null;
+            const b = ui.div(c).wFull().h(52).rounded(20).justifyCenter().itemsCenter();
+            if (on) _ = b.bg(cards.ink);
+            ui.text(c, t[1], .{ .size = 12, .weight = .semibold, .color = if (on) .white else cards.ink });
+            if (b.clicked()) s.pickTab(t[0]);
+            b.end();
+        }
+    }
+
+    fn pickTab(s: *App, t: Tab) void {
+        s.tab = t;
+        s.route = null;
+        s.chosen = null;
+        nanoui.haptics.selection();
+    }
+
+    /// Folded, on a trip's legs: Go, pinned where the tab bar was.
+    fn goBar(s: *App, c: *ui.Context, box: ui.Rect, sa: ui.Edges) void {
+        const w = box.w - 32 - sa.left - sa.right;
+        const bar = ui.div(c).absolute().offset(16 + sa.left, box.h - 56 - @max(sa.bottom, 12) - 4).w(w);
+        defer bar.end();
+        @import("journey_view.zig").goButton(s, c);
     }
 
     fn stopList(s: *App, c: *ui.Context, title: []const u8, list: []const u16) void {
@@ -173,7 +224,6 @@ pub const App = struct {
     }
 
     fn tabBar(s: *App, c: *ui.Context, box: ui.Rect, sa: ui.Edges) void {
-        const tabs = [_]struct { Tab, []const u8 }{ .{ .nearby, "Nearby" }, .{ .starred, "Starred" }, .{ .journey, "Journey" }, .{ .about, "About" } };
         const w: f32 = 4 * 82 + 12;
         const bar = ui.div(c).absolute().offset(@max(8, (box.w - w) / 2), box.h - 64 - @max(sa.bottom, 12)).row().w(w).h(56).p(6).gap(0).roundedFull().glass(.{}).shadowMd();
         defer bar.end();
@@ -183,12 +233,7 @@ pub const App = struct {
             const b = ui.div(c).w(82).hFull().roundedFull().justifyCenter().itemsCenter();
             if (on) _ = b.bg(cards.ink);
             ui.text(c, t[1], .{ .size = 13, .weight = .semibold, .color = if (on) .white else cards.ink });
-            if (b.clicked()) {
-                s.tab = t[0];
-                s.route = null;
-                s.chosen = null;
-                nanoui.haptics.selection();
-            }
+            if (b.clicked()) s.pickTab(t[0]);
             b.end();
         }
     }
@@ -283,6 +328,9 @@ pub fn main(init: std.process.Init) !void {
     defer s.m.deinit();
     defer s.line.deinit(gpa);
     defer s.stars.deinit(gpa);
+    s.nav.app = &s;
+    defer s.nav.deinit();
+    if (init.environ_map.get("SGBUS_NAV_SIM")) |v| s.nav.sim_speeds = nav.parseSim(v);
     s.journey.app = &s;
     // At run time only: never stored, printed or bundled.
     s.journey.token = init.environ_map.get("ONEMAP_TOKEN");
@@ -307,6 +355,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn moved(s: *App, l: *nanoui.location.Location) void {
+    // A simulated walk moves `here` itself.
+    if (s.nav.sim != null) return;
     if (l.fix) |f| s.here = .{ .lat = f.lat, .lng = f.lng };
     if (s.window) |w| w.redraw();
 }

@@ -17,6 +17,7 @@ const cards = @import("cards.zig");
 const onemap = @import("onemap.zig");
 const live = @import("live.zig");
 const App = @import("main.zig").App;
+const text = @import("text.zig");
 
 pub const Place = struct {
     buf: [64]u8 = undefined,
@@ -69,6 +70,8 @@ pub const Journey = struct {
     om_state: enum { off, asking, ok, failed, sample } = .off,
     om_status: u16 = 0,
     om_chosen: ?usize = null,
+    /// Two codes on one pin, for the frame.
+    pin_labels: [2 * raptor.rounds][15]u8 = undefined,
 
     pub fn trip(j: *const Journey) ?raptor.Option {
         if (j.om_chosen != null) return null;
@@ -100,7 +103,8 @@ pub const Journey = struct {
         j.n_places = 0;
         for (list) |v| {
             if (j.n_places == 4) break;
-            const n = str(v, "SEARCHVAL");
+            var tb: [64]u8 = undefined;
+            const n = text.titleCase(&tb, str(v, "SEARCHVAL"));
             const lat = std.fmt.parseFloat(f64, str(v, "LATITUDE")) catch continue;
             const lng = std.fmt.parseFloat(f64, str(v, "LONGITUDE")) catch continue;
             j.places[j.n_places] = .init(n, .{ .lat = lat, .lng = lng }, null);
@@ -260,19 +264,73 @@ pub const Journey = struct {
         out.append(s.gpa, j.dest.?.at) catch return;
     }
 
-    pub fn pins(j: *const Journey, t: raptor.Option, out: []map.Pin) []map.Pin {
+    /// A pin per stop got on or off at: one where a change uses the same
+    /// station twice (Bugis, EW12 then DT14), with both its codes.
+    pub fn pins(j: *Journey, t: raptor.Option, out: []map.Pin) []map.Pin {
         const s = j.app;
         var n: usize = 0;
         for (0..t.n) |i| {
             const r = t.rides[i];
             for ([2]u16{ r.from, r.to }) |pos| {
                 const st = raptor.stopAt(s.d, r.svc, r.dir, pos);
-                out[n] = .{ .id = st, .at = s.d.stops[st].at, .label = raptor.rail.codeOn(s.d, st, r.svc), .selected = i == 0 and pos == r.from };
+                const code = raptor.rail.codeOn(s.d, st, r.svc);
+                var seen: ?usize = null;
+                for (out[0..n], 0..) |p, k| if (p.id == st) {
+                    seen = k;
+                };
+                if (seen) |k| {
+                    if (!std.mem.eql(u8, out[k].label, code)) out[k].label = std.fmt.bufPrint(&j.pin_labels[k], "{s} {s}", .{ out[k].label, code }) catch out[k].label;
+                    continue;
+                }
+                out[n] = .{ .id = st, .at = s.d.stops[st].at, .label = code, .selected = i == 0 and pos == r.from };
                 n += 1;
             }
         }
         out[n] = .{ .id = 200000, .at = j.dest.?.at, .label = "To here", .style = .bus };
         return out[0 .. n + 1];
+    }
+
+    /// The trip's lines: each walk dotted blue, each ride in its colour.
+    pub fn lines(j: *const Journey, t: raptor.Option, pts: *std.ArrayList(map.Coord), out: []map.Line) []map.Line {
+        const s = j.app;
+        pts.clearRetainingCapacity();
+        // Points first (the list may grow), then slices into it.
+        var runs: [2 * raptor.rounds + 1][3]usize = undefined;
+        var n: usize = 0;
+        var prev = s.here;
+        for (0..t.n + 1) |i| {
+            const start = pts.items.len;
+            pts.append(s.gpa, prev) catch return out[0..0];
+            if (i < t.n) {
+                const r = t.rides[i];
+                const a = s.d.stops[raptor.stopAt(s.d, r.svc, r.dir, r.from)].at;
+                pts.append(s.gpa, a) catch return out[0..0];
+                runs[n] = .{ start, 2, 0 };
+                n += 1;
+                const rs = pts.items.len;
+                for (s.d.services[r.svc].dirs[r.dir][r.from .. r.to + 1]) |st| pts.append(s.gpa, s.d.stops[st].at) catch return out[0..0];
+                runs[n] = .{ rs, pts.items.len - rs, 1 + i };
+                n += 1;
+                prev = pts.items[pts.items.len - 1];
+            } else {
+                pts.append(s.gpa, j.dest.?.at) catch return out[0..0];
+                runs[n] = .{ start, 2, 0 };
+                n += 1;
+            }
+        }
+        var k: usize = 0;
+        for (runs[0..n]) |run| {
+            if (k == out.len) break;
+            const p = pts.items[run[0] .. run[0] + run[1]];
+            if (run[2] == 0) {
+                out[k] = .{ .points = p, .color = .hex(0x1A73E8), .dashed = true };
+            } else {
+                const svc = t.rides[run[2] - 1].svc;
+                out[k] = .{ .points = p, .color = if (s.d.services[svc].rail) |l| .hex(l.color) else cards.green, .width = 6 };
+            }
+            k += 1;
+        }
+        return out[0..k];
     }
 
     /// The route line's colour: the line of the longest train ride, else bus green.

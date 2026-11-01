@@ -69,8 +69,8 @@ pub fn stopCard(s: *App, c: *ui.Context, idx: u16, on: bool) void {
         const name = ui.div(c).row().grow().gap(10).itemsCenter();
         chip(c, st.code, on);
         const words = ui.div(c).column().grow();
-        ui.text(c, st.name, .{ .size = 17, .weight = .semibold, .color = ink, .truncate = .ellipsis });
-        ui.text(c, st.road, .{ .size = 13, .color = gray, .truncate = .ellipsis });
+        ui.text(c, st.name, .{ .size = 17, .weight = .semibold, .color = ink, .wrap = true });
+        ui.text(c, st.road, .{ .size = 13, .color = gray, .wrap = true });
         words.end();
         if (name.clicked()) s.choose(idx);
         name.end();

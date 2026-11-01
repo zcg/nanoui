@@ -10,6 +10,7 @@ const Coord = @import("nanoui").map.Coord;
 test {
     _ = @import("onemap.zig");
     _ = @import("tests_rail.zig");
+    _ = @import("text.zig");
 }
 
 test "fares follow LTA's table from 27 December 2025" {

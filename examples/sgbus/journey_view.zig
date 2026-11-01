@@ -55,7 +55,7 @@ fn form(s: *App, c: *ui.Context) void {
     for (j.places[0..j.n_places], 0..) |*p, i| {
         c.next_key_int = i;
         const card = ui.div(c).column().wFull().rounded(22).bg(.white).p(16).gap(2);
-        ui.text(c, p.name(), .{ .size = 17, .weight = .semibold, .color = ink, .truncate = .ellipsis });
+        ui.text(c, p.name(), .{ .size = 17, .weight = .semibold, .color = ink, .wrap = true });
         const near = s.d.nearest(p.at, raptor.walk_radius, s.scratch[0..1]);
         label(c, if (near.len > 0) c.print("OneMap · near {s}", .{s.d.stops[near[0]].name}) else "OneMap · no stop within 450 m");
         if (card.clicked()) j.go(p.*);
@@ -66,7 +66,9 @@ fn form(s: *App, c: *ui.Context) void {
         c.next_key_int = 100 + i;
         const card = ui.div(c).row().wFull().rounded(22).bg(.white).p(16).gap(10).itemsCenter();
         cards.chip(c, s.d.stops[st].code, false);
-        ui.text(c, s.d.stops[st].name, .{ .size = 17, .color = ink, .truncate = .ellipsis });
+        const words = ui.div(c).column().grow();
+        ui.text(c, s.d.stops[st].name, .{ .size = 17, .color = ink, .wrap = true });
+        words.end();
         if (card.clicked()) j.go(.init(s.d.stops[st].name, s.d.stops[st].at, st));
         card.end();
     }
@@ -173,10 +175,19 @@ fn legs(s: *App, c: *ui.Context, t: raptor.Option) void {
     if (t.walks[t.n] >= 30) step(s, c, &n, null, c.print("Walk {d} m to {s}", .{ @as(u32, @intFromFloat(t.walks[t.n])), j.dest.?.name() }), c.print("{d} min", .{@as(u32, @intFromFloat(@ceil(raptor.walkMin(t.walks[t.n]))))}));
     card.end();
     if (t.fare) |f| para(c, c.print("Adult card fare ${d}.{d:0>2}, {d:.1} km, by LTA's distance fares.", .{ f / 100, f % 100, t.km })) else para(c, "City Direct has its own fares.");
-    const go = ui.div(c).row().wFull().justifyCenter().itemsCenter().h(56).roundedFull().bg(if (j.going) cards.yellow else ink);
-    ui.text(c, if (j.going) "Going. Watch for the bus" else "Go", .{ .size = 17, .weight = .semibold, .color = if (j.going) ink else .white });
+    // Folded, Go is pinned at the bottom (main.zig's goBar).
+    if (s.two) goButton(s, c);
+}
+
+/// Go: turn by turn, with Apple Maps' walks.
+pub fn goButton(s: *App, c: *ui.Context) void {
+    const j = &s.journey;
+    const t = j.trip() orelse return;
+    const go = ui.div(c).row().wFull().justifyCenter().itemsCenter().h(56).roundedFull().bg(ink).shadowMd();
+    ui.text(c, "Go", .{ .size = 17, .weight = .semibold, .color = .white });
     if (go.clicked()) {
         j.going = true;
+        s.nav.start(t, j.dest.?.at, j.dest.?.name());
         nanoui.haptics.notify(.success);
     }
     go.end();
@@ -208,6 +219,7 @@ fn step(s: *App, c: *ui.Context, n: *usize, svc: ?u16, what: []const u8, detail:
     }
     const col = ui.div(c).column().grow();
     ui.text(c, what, .{ .size = 17, .color = ink, .wrap = true });
-    label(c, detail);
+    // Wraps: "East West Line towards Tuas Link, about 1 min wait, a train every 5 min".
+    para(c, detail);
     col.end();
 }
