@@ -28,8 +28,6 @@ pub const Page = struct {
     webview: ?*Com = null,
     /// Kept for `CreateWebResourceResponse`, which the environment makes.
     environment: ?*Com = null,
-    /// Every handler WebView2 may still call, freed with the page.
-    handlers: std.ArrayList(*Com) = .empty,
     /// WebView2's profile folder for this app, kept for the environment's life.
     data_dir: [:0]u16,
     /// A flush was asked for before the controller existed.
@@ -38,8 +36,20 @@ pub const Page = struct {
     pending_start: bool = true,
     /// `--nanoui-eval`, kept until the page has loaded.
     pending_eval: ?[]const u8 = null,
+    /// A hidden run's window, shown off-screen while the controller is made
+    /// (a parent never shown leaves the controller waiting), and hidden
+    /// again once it answers — right or wrong.
+    hidden_shown: bool = false,
+    restore_rect: ?w.RECT = null,
+    /// The registrations of the three event handlers, for `remove_*` at
+    /// destroy: that is what releases them, now, not whenever the runtime
+    /// gets round to it. 0: not registered.
+    token_resource: i64 = 0,
+    token_message: i64 = 0,
+    token_nav: i64 = 0,
 
-    pub fn create(window: *Window, options: window_mod.PageOptions) !*Page {        const gpa = window.app.gpa;
+    pub fn create(window: *Window, options: window_mod.PageOptions) !*Page {
+        const gpa = window.app.gpa;
         const hwnd = window.hwnd orelse return error.NoWindow;
         const self = try gpa.create(Page);
         errdefer gpa.destroy(self);
@@ -85,56 +95,64 @@ pub const Page = struct {
         const loader = wv.Loader.get() orelse return;
         const handler = self.makeHandler(EnvCreated) catch return;
         const hr = loader.create_environment(null, self.data_dir.ptr, null, handler);
+        // The handler's maker reference went with the call: the runtime
+        // addref'd its own, and releases it after the callback.
+        _ = wv.Com.release(handler);
         if (hr < 0) {
             std.log.warn("nanoui: CreateCoreWebView2EnvironmentWithOptions failed (0x{x})", .{@as(u32, @bitCast(hr))});
         }
     }
 
-    /// A handler object, remembered so `destroy` frees it after the calls
-    /// WebView2 may still make have run.
+    /// A handler object: COM from here on. Its maker reference goes to the
+    /// call that hands it over (released there, at once), and after that the
+    /// box lives exactly as long as WebView2's own references — it frees
+    /// itself when the last drops, which may be after the page (a window
+    /// closed under a pending callback) is long gone.
     fn makeHandler(self: *Page, comptime T: type) !*Com {
         // `T.vtable` is a comptime constant: `&T.vtable` points at static
         // storage, where a local's address would dangle the moment this
         // returns (WebView2 keeps the vtable it is given).
         const holder = try self.queue.gpa.create(Box(T));
-        holder.* = .{ .com = .{ .vtable = &Box(T).vtable_storage }, .page = self };
-        try self.handlers.append(self.queue.gpa, &holder.com);
+        holder.* = .{ .com = .{ .vtable = &Box(T).vtable_storage }, .page = self, .gpa = self.queue.gpa };
         return &holder.com;
     }
 
     pub fn destroy(self: *Page) void {
         self.queue.deinit();
-        // Close the controller first: WebView2 may still call a handler
-        // while it tears the view down, so the handlers outlive this call by
-        // one turn of the loop (`freeNow`, on `WM_NANOUI_FREE`).
-        if (self.controller) |c| _ = wv.Controller.close(c);
-        if (self.webview) |v| v.release();
+        // Close the controller first, and give back the reference
+        // `controllerReady` took: the view goes with it.
+        if (self.controller) |c| {
+            _ = wv.Controller.close(c);
+            _ = wv.Com.release(c);
+        }
+        if (self.webview) |v| {
+            // The three registrations let go here: each remove releases the
+            // handler's own reference now. Whatever WebView2 still holds
+            // after this — a callback already in flight — frees itself.
+            if (self.token_resource != 0) _ = wv.WebView.removeWebResourceRequested(v, self.token_resource);
+            if (self.token_message != 0) _ = wv.WebView.removeWebMessageReceived(v, self.token_message);
+            if (self.token_nav != 0) _ = wv.WebView.removeNavigationCompleted(v, self.token_nav);
+            v.release();
+        }
         if (self.environment) |e| e.release();
         self.controller = null;
         self.webview = null;
         self.environment = null;
-        // Freed in the same call: a window closing does not always have a
-        // loop turn left to be freed on (`App` teardown posts no message
-        // that any loop would read), and a page that leaks its whole state
-        // on every close is a leak per window.
         self.freeNow();
     }
 
-    /// Frees the page, its handlers and its profile path: on the loop's next
-    /// turn, once WebView2 has finished with them.
+    /// Frees the page and its profile path. The handlers need nothing from
+    /// it any more: each is alive until WebView2's own references drop.
     pub fn freeNow(self: *Page) void {
         const gpa = self.queue.gpa;
-        for (self.handlers.items) |h| gpa.destroy(@as(*Box(EnvCreated), @ptrCast(@alignCast(h))));
-        self.handlers.deinit(gpa);
         gpa.free(self.data_dir);
         gpa.destroy(self);
     }
 
     pub fn enqueue(self: *Page, msg: []const u8, hold: bool) void {
         self.queue.enqueue(msg, hold);
-        if (self.queue.flush_scheduled) return;
-        self.queue.schedule();
-        self.requestFlush();
+        // One post a turn: only the call that scheduled the flush asks for it.
+        if (self.queue.schedule()) self.requestFlush();
     }
 
     pub fn domReady(self: *Page) void {
@@ -182,8 +200,11 @@ pub const Page = struct {
         window_mod.postFlush(self.hwnd);
     }
 
-    pub fn startDrag(_: *Page) void {
-        // The window's frame is the system's: it drags itself.
+    pub fn startDrag(self: *Page) void {
+        // The frame is the system's: one synthetic caption press makes the
+        // window follow the mouse until the button goes up.
+        _ = w.ReleaseCapture();
+        _ = w.PostMessageW(self.hwnd, w.WM_NCLBUTTONDOWN, @intCast(w.HTCAPTION), 0);
     }
 
     /// Runs `js` as a statement list, not as `__nanoui.receive(...)`: the
@@ -199,6 +220,7 @@ pub const Page = struct {
         wide.append(self.queue.gpa, 0) catch return;
         const handler = self.makeHandler(ScriptDone) catch return;
         _ = wv.WebView.executeScript(view, @ptrCast(wide.items.ptr), handler);
+        _ = wv.Com.release(handler); // the maker's reference went with the call
     }
 
     /// The page's message loop has asked for the queued messages.
@@ -212,16 +234,10 @@ pub const Page = struct {
         var buf: [2048]u8 = undefined;
         // An absolute URL (`https://example.com`) loads as is, as WKWebView's
         // does; only a path is the app's own, served from its assets.
-        const full = if (std.mem.startsWith(u8, url, "http://") or std.mem.startsWith(u8, url, "https://"))
-            url
-        else
-            std.fmt.bufPrint(&buf, "{s}{s}{s}", .{
-                page.origin,
-                if (url.len > 0 and url[0] == '/') "" else "/",
-                url,
-            }) catch return;
+        const full = page.fullUrl(&buf, url);
         var wide: [2048]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(&wide, full) catch return;
+        if (n >= wide.len) return; // no room for the terminator either
         wide[n] = 0;
         // Kept for the page bar: which entry is the one showing.
         self.queue.setCurrent(url);
@@ -246,21 +262,43 @@ pub const Page = struct {
     /// Asks for the controller, when the loop reaches `WM_NANOUI_CONTROLLER`.
     pub fn makeController(self: *Page) void {
         const env = self.environment orelse return;
-        // WebView2 adds its view as a child of `hwnd`, and a parent that is
-        // not shown yet leaves the controller waiting: the window is shown
-        // first, as the samples do (they make the view in `WM_CREATE`, after
-        // the window exists and before the first paint).
+        // A parent that has never been shown leaves the controller waiting
+        // (the samples show their window before they make the view). A
+        // hidden run — `--nanoui-hidden`, `--nanoui-eval` — shows the window
+        // off-screen instead, without activating it, and hides it again
+        // when the controller answers, right or wrong (`endHiddenShow`).
         if (w.IsWindowVisible(self.hwnd) == 0) {
-            _ = w.ShowWindow(self.hwnd, 5); // SW_SHOW
+            self.hidden_shown = true;
+            var rect: w.RECT = undefined;
+            if (w.GetWindowRect(self.hwnd, &rect) != 0) self.restore_rect = rect;
+            _ = w.SetWindowPos(self.hwnd, null, -32000, -32000, 0, 0, w.SWP_NOSIZE | w.SWP_NOZORDER | w.SWP_NOACTIVATE);
+            _ = w.ShowWindow(self.hwnd, 8); // SW_SHOWNA
         }
         const handler = self.makeHandler(CtlCreated) catch return;
         const hr = wv.Environment.createController(env, self.hwnd, handler);
-        if (hr < 0) std.log.warn("nanoui: CreateCoreWebView2Controller failed (0x{x})", .{@as(u32, @bitCast(hr))});
+        _ = wv.Com.release(handler); // the maker's reference went with the call
+        if (hr < 0) {
+            self.endHiddenShow();
+            std.log.warn("nanoui: CreateCoreWebView2Controller failed (0x{x})", .{@as(u32, @bitCast(hr))});
+        }
+    }
+
+    /// The controller question is settled: a window shown for it goes back
+    /// to being hidden, where it was.
+    fn endHiddenShow(self: *Page) void {
+        if (!self.hidden_shown) return;
+        self.hidden_shown = false;
+        _ = w.ShowWindow(self.hwnd, 0); // SW_HIDE
+        if (self.restore_rect) |r| {
+            self.restore_rect = null;
+            _ = w.SetWindowPos(self.hwnd, null, r.left, r.top, 0, 0, w.SWP_NOSIZE | w.SWP_NOZORDER | w.SWP_NOACTIVATE);
+        }
     }
 
     /// The controller is there: the page's origin, the bridge, the handlers.
     fn controllerReady(self: *Page, ctl: *Com) void {
         if (self.queue.window.app.debug) std.debug.print("nanoui: webview2 controller ready\n", .{});
+        const gpa = self.queue.gpa;
         self.controller = ctl;
         _ = ctl.addRef();
         var view: ?*Com = null;
@@ -283,25 +321,33 @@ pub const Page = struct {
 
         // Every request to our origin is answered from the asset table.
         const filter = wv.utf8LitZ(page.origin ++ "/*");
-        _ = wv.WebView.addResourceFilter(v, filter, wv.resource_context_all);        if (self.makeHandler(ResourceRequested)) |h| {
-            _ = wv.WebView.addWebResourceRequested(v, h, null);
+        _ = wv.WebView.addResourceFilter(v, filter, wv.resource_context_all);
+        // Three event handlers, each handed over with its maker reference
+        // (released at once below): the runtime holds its own until the
+        // `remove_*` in `destroy`.
+        if (self.makeHandler(ResourceRequested)) |h| {
+            if (wv.WebView.addWebResourceRequested(v, h, &self.token_resource) < 0) self.token_resource = 0;
+            _ = wv.Com.release(h);
         } else |_| {}
         if (self.makeHandler(MessageReceived)) |h| {
-            _ = wv.WebView.addWebMessageReceived(v, h, null);
+            if (wv.WebView.addWebMessageReceived(v, h, &self.token_message) < 0) self.token_message = 0;
+            _ = wv.Com.release(h);
         } else |_| {}
         // The page is there once its navigation completes: `--nanoui-eval`
         // runs then, when there is a document to run it in.
         if (self.makeHandler(NavigationCompleted)) |h| {
-            _ = wv.WebView.addNavigationCompleted(v, h, null);
+            if (wv.WebView.addNavigationCompleted(v, h, &self.token_nav) < 0) self.token_nav = 0;
+            _ = wv.Com.release(h);
         } else |_| {}
 
-        // The bridge, before the page's own scripts run.
-        var wide: [8192]u16 = undefined;
-        const n = std.unicode.utf8ToUtf16Le(&wide, bridge_js) catch 0;
-        if (n > 0) {
-            wide[n] = 0;
-            _ = wv.WebView.addScript(v, wide[0..n :0], null);
-        }
+        // The bridge, before the page's own scripts run. On the heap: the
+        // file grows, and a fixed buffer would drop it on the floor silently.
+        const n = std.unicode.calcUtf16LeLen(bridge_js) catch return;
+        const wide = gpa.alloc(u16, n + 1) catch return;
+        defer gpa.free(wide);
+        _ = std.unicode.utf8ToUtf16Le(wide, bridge_js) catch return;
+        wide[n] = 0;
+        _ = wv.WebView.addScript(v, wide[0..n :0].ptr, null);
 
         self.load(self.queue.options.url);
         if (self.pending_flush) {
@@ -327,10 +373,22 @@ fn Box(comptime T: type) type {
     return struct {
         com: Com,
         page: *Page,
+        /// The references alive: 1 at birth (the maker's, released the
+        /// moment the call that takes the handler returns), then WebView2's
+        /// own. All calls on it are the UI thread's, where the runtime runs
+        /// its callbacks.
+        refs: u32 = 1,
+        gpa: std.mem.Allocator,
 
         /// The vtable WebView2 keeps: `vtable_storage` is a container whose
         /// address is the compile-time constant itself, not a copy.
         const vtable_storage: [wv.handler_slots + 1]*const anyopaque = wv.HandlerVtable(@This(), T.invoke);
+
+        /// The last reference gone: free. Nothing of the page is touched —
+        /// the page may already be gone (a window closed under a callback).
+        pub fn release_free(self: *@This()) void {
+            self.gpa.destroy(self);
+        }
     };
 }
 
@@ -385,6 +443,7 @@ test "the environment handler takes an HRESULT and a result" {
 
 const CtlCreated = struct {
     fn invoke(box: *Box(CtlCreated), err: HRESULT, result: ?*Com) callconv(.winapi) HRESULT {
+        box.page.endHiddenShow();
         if (err >= 0) if (result) |ctl| box.page.controllerReady(ctl);
         return wv.S_OK;
     }
@@ -429,7 +488,8 @@ const MessageReceived = struct {
         defer wv.coTaskMemFree(raw);
         const wide = raw orelse return wv.S_OK;
         const gpa = box.page.queue.gpa;
-        var buf: std.ArrayList(u8) = .empty;        defer buf.deinit(gpa);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(gpa);
         // UTF-16 is at most as long as UTF-8 in bytes, never longer.
         const units = std.mem.span(wide);
         buf.ensureTotalCapacity(gpa, units.len * 3) catch return wv.S_OK;
@@ -492,9 +552,6 @@ fn makeResponse(env: *Com, served: page.Served, gpa: std.mem.Allocator, out: *?*
     return wv.Environment.createResponse(env, stream, @intCast(served.status), reasonZ(served.status), headers.ptr, out);
 }
 
-const Stream = extern struct { vtable: [*]const *const anyopaque };
-extern "shlwapi" fn SHCreateMemStream(bytes: ?[*]const u8, len: u32) callconv(.winapi) ?*Stream;
-
 /// An `IStream` over a copy of `bytes`.
 ///
 /// `CreateStreamOnHGlobal`: the stream owns the memory (WebView2 reads it
@@ -541,4 +598,3 @@ fn headersZ(gpa: std.mem.Allocator, mime: []const u8) ?[:0]u16 {
     buf[n] = 0;
     return buf[0..n :0];
 }
-

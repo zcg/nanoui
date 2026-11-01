@@ -270,6 +270,11 @@ pub const WM_GETMINMAXINFO = 0x0024;
 pub const WM_NCLBUTTONDOWN = 0x00A1;
 /// HTCAPTION: the window's caption bar, for `WM_NCLBUTTONDOWN`.
 pub const HTCAPTION = 2;
+/// `SetWindowPos` flags: move without resizing, order or activation — what
+/// parking a window off-screen for WebView2's sake takes.
+pub const SWP_NOSIZE: u32 = 0x0001;
+pub const SWP_NOZORDER: u32 = 0x0004;
+pub const SWP_NOACTIVATE: u32 = 0x0010;
 pub const WM_KEYDOWN = 0x0100;
 pub const WM_CHAR = 0x0102;
 pub const WM_SYSKEYDOWN = 0x0104;

@@ -87,24 +87,23 @@ pub const Page = struct {
         objc.msg(void, self.webview, "removeFromSuperview", .{});
         objc.release(self.webview);
         objc.release(self.handler);
+        if (self.last_mouse_down) |e| objc.release(e);
         self.queue.deinit();
+        // A scheduled flush frees the page when it runs; without one, now.
+        if (self.queue.flush_scheduled) return;
         self.queue.gpa.destroy(self);
     }
 
     pub fn enqueue(self: *Page, msg: []const u8, hold: bool) void {
         self.queue.enqueue(msg, hold);
-        self.queue.schedule();
-        if (self.queue.flush_scheduled) objc.dispatchMain(self, flushJob);
+        // One block a turn: only the call that scheduled the flush dispatches.
+        if (self.queue.schedule()) objc.dispatchMain(self, flushJob);
     }
 
     pub fn domReady(self: *Page) void {
-        self.queue.dom_ready = true;
-        const gpa = self.queue.gpa;
-        for (self.queue.held.items) |m| {
-            self.queue.enqueue(m, false);
-            gpa.free(m);
-        }
-        self.queue.held.clearRetainingCapacity();
+        // Held messages go out, and the app's `--nanoui-eval` runs: the
+        // document is there, as it was when this ran inside `Page`.
+        self.queue.domReady();
         // The bar of the app's pages: every document gets it, an app's own
         // page and the web's alike.
         self.sendPageBar();
@@ -138,13 +137,10 @@ pub const Page = struct {
     }
 
     fn loadUrl(self: *Page, url: []const u8) void {
-        self.queue.dom_ready = false;
         self.queue.setCurrent(url);
-        const full = std.fmt.bufPrint(&stackBuf, "{s}{s}{s}", .{
-            page.origin,
-            if (url.len > 0 and url[0] == '/') "" else "/",
-            url,
-        }) catch url;
+        // An absolute `http(s)://` URL loads as it is, as WebView2's does;
+        // only a path is the app's own, served from its assets.
+        const full = page.fullUrl(&stackBuf, url);
         const nsurl = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString(full)}) orelse return;
         const req = objc.msg(objc.Object, objc.class("NSURLRequest"), "requestWithURL:", .{nsurl});
         self.queue.dom_ready = false;
@@ -176,6 +172,8 @@ fn flushJob(ctx: ?*anyopaque) callconv(.c) void {
 
 fn didReceiveScriptMessage(self_obj: objc.Object, _: objc.SEL, _: objc.Object, message: objc.Object) callconv(.c) void {
     const self = objc.getZig(Page, self_obj) orelse return;
+    const pool = objc.Pool.push();
+    defer pool.pop();
     const body = objc.msg(objc.Object, message, "body", .{});
     ipc.handleMessage(self.queue.window, objc.fromNSString(body));
 }
@@ -188,6 +186,8 @@ fn startURLSchemeTask(self_obj: objc.Object, _: objc.SEL, _: objc.Object, task: 
 fn stopURLSchemeTask(_: objc.Object, _: objc.SEL, _: objc.Object, _: objc.Object) callconv(.c) void {}
 
 fn serve(self: *Page, task: objc.Object) void {
+    const pool = objc.Pool.push();
+    defer pool.pop();
     const req = objc.msg(objc.Object, task, "request", .{});
     const url = objc.msg(objc.Object, req, "URL", .{});
     const path = objc.fromNSString(objc.msg(?objc.Object, url, "path", .{}));
@@ -208,5 +208,9 @@ fn serve(self: *Page, task: objc.Object) void {
 
 fn webViewMouseDown(self_obj: objc.Object, _: objc.SEL, event: objc.Object) callconv(.c) void {
     const self = objc.getZig(Page, self_obj) orelse return;
-    self.last_mouse_down = event;
+    // Kept for `startDrag` after the callback returns: owned, the old one
+    // let go, and WebKit's own press still runs.
+    if (self.last_mouse_down) |old| objc.release(old);
+    self.last_mouse_down = objc.retain(event);
+    objc.msgSuper(void, self_obj, objc.class("WKWebView"), "mouseDown:", .{event});
 }

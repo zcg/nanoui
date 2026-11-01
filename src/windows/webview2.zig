@@ -146,7 +146,8 @@ pub const Environment = struct {
             *const fn (*Com, ?*Com, i32, [*:0]const u16, [*:0]const u16, *?*Com) callconv(.winapi) HRESULT,
             4,
         )(e, content, status, reason, headers, out);
-    }};
+    }
+};
 
 // ---------------------------------------------------------------------------
 // ICoreWebView2Controller
@@ -229,6 +230,22 @@ pub const WebView = struct {
         return w.slot(*const fn (*Com, *Com, ?*i64) callconv(.winapi) HRESULT, 55)(w, handler, token);
     }
 
+    /// 56: `remove_WebResourceRequested(token)`: releases the handler now,
+    /// where the runtime would otherwise hold it until teardown.
+    pub fn removeWebResourceRequested(w: *Com, token: i64) HRESULT {
+        return w.slot(*const fn (*Com, i64) callconv(.winapi) HRESULT, 56)(w, token);
+    }
+
+    /// 35: `remove_WebMessageReceived(token)`.
+    pub fn removeWebMessageReceived(w: *Com, token: i64) HRESULT {
+        return w.slot(*const fn (*Com, i64) callconv(.winapi) HRESULT, 35)(w, token);
+    }
+
+    /// 16: `remove_NavigationCompleted(token)`.
+    pub fn removeNavigationCompleted(w: *Com, token: i64) HRESULT {
+        return w.slot(*const fn (*Com, i64) callconv(.winapi) HRESULT, 16)(w, token);
+    }
+
     /// 57: `AddWebResourceRequestedFilter(uri, resourceContext)`.
     pub fn addResourceFilter(w: *Com, uri: [*:0]const u16, context: u32) HRESULT {
         return w.slot(*const fn (*Com, [*:0]const u16, u32) callconv(.winapi) HRESULT, 57)(w, uri, context);
@@ -301,34 +318,38 @@ pub const Settings = struct {
 /// numbers `IUnknown` leaves for the interface itself.
 pub const handler_slots = 3;
 
-/// Builds the vtable of a handler, at comptime. `invoke` is `T.invoke`:
-/// it takes the box a handler's `Invoke` was called on, then that
-/// interface's own arguments. The three signatures WebView2 has are
-/// `(HRESULT, result)`, `(sender, args)` and `(sender, args)` for the
-/// others, so the shim is chosen by arity.
+/// Builds the vtable of a handler, at comptime. `T` is the handler's box:
+/// it has `com` first (`@fieldParentPtr` finds it), a `refs` count the
+/// vtable keeps, and `release_free`, which frees the box when the count
+/// reaches zero — so a handler outlives the page that made it, exactly as
+/// long as WebView2 still holds it. `invoke` is `T.invoke`: it takes the
+/// box a handler's `Invoke` was called on, then that interface's own
+/// arguments. The signatures WebView2 has are `(HRESULT, result)` and
+/// `(sender, args)`, so the shim is chosen by the second parameter's type.
 pub fn HandlerVtable(comptime T: type, comptime invoke: anytype) [handler_slots + 1]*const anyopaque {
     // `invoke` takes the box first, so the environment's `(errorCode, result)`
     // is the one whose second parameter is an integer.
     const Impl = struct {
         fn query(this: *Com, iid: *const Guid, out: *?*anyopaque) callconv(.winapi) HRESULT {
             _ = iid;
+            _ = addRef(this);
             out.* = @ptrCast(this);
             return 0;
         }
 
         fn addRef(this: *Com) callconv(.winapi) u32 {
-            _ = this;
-            return 1;
+            const box: *T = @fieldParentPtr("com", this);
+            box.refs += 1;
+            return box.refs;
         }
 
         fn release(this: *Com) callconv(.winapi) u32 {
-            _ = this;
-            return 1;
-        }
-
-        fn invokeTwo(this: *Com, a: usize, b: ?*Com) callconv(.winapi) HRESULT {
             const box: *T = @fieldParentPtr("com", this);
-            return invoke(box, @as(HRESULT, @bitCast(@as(u32, @truncate(a)))), b);        }
+            box.refs -= 1;
+            const refs = box.refs;
+            if (refs == 0) box.release_free();
+            return refs;
+        }
 
         fn invokeThree(this: *Com, a: ?*Com, b: ?*Com) callconv(.winapi) HRESULT {
             const box: *T = @fieldParentPtr("com", this);

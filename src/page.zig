@@ -88,9 +88,11 @@ pub fn Queue(comptime Window: type) type {
         }
 
         /// Sends everything queued, in one evaluation, when the loop turns.
-        pub fn schedule(self: *Self) void {
-            if (self.flush_scheduled) return;
+        /// True when this call is the one that scheduled it.
+        pub fn schedule(self: *Self) bool {
+            if (self.flush_scheduled) return false;
             self.flush_scheduled = true;
+            return true;
         }
 
         /// The page's DOM is there: held messages go out, and `--nanoui-eval`.
@@ -157,10 +159,23 @@ fn notFound() Served {
     return .{ .data = "Not Found", .mime = "text/plain", .status = 404 };
 }
 
-/// The path part of a URL on `origin` (`/index.html`), or "/" for the root.
+/// The path part of a URL on `origin` (`/index.html`), or "/" for the root —
+/// also for a URL that is not on `origin` at all, which is nobody's path.
 pub fn pathOf(url: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, url, origin)) return "/";
     const rest = url[origin.len..];
     return if (rest.len == 0) "/" else rest;
+}
+
+/// The URL to load: an absolute `http(s)://` one as it is, else the path on
+/// `origin` the app serves its assets on. `buf` holds the composed one.
+pub fn fullUrl(buf: []u8, url: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, url, "http://") or std.mem.startsWith(u8, url, "https://")) return url;
+    return std.fmt.bufPrint(buf, "{s}{s}{s}", .{
+        origin,
+        if (url.len > 0 and url[0] == '/') "" else "/",
+        url,
+    }) catch url;
 }
 
 pub fn mimeType(path: []const u8) []const u8 {

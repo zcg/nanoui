@@ -139,6 +139,9 @@ pub const App = struct {
         const win = try Window.create(self, options);
         errdefer win.close();
         try self.windows.append(self.gpa, win);
+        // A window made while the loop runs starts its page's WebView2 here:
+        // `run` only started the windows that existed before it.
+        if (self.running) if (win.page) |p| p.start();
         return win;
     }
 

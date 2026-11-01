@@ -35,7 +35,8 @@ pub fn userDataDir(window: *Window, gpa: std.mem.Allocator, name: []const u8) ![
         if (window.app.debug)
             std.debug.print("nanoui: no WebView2 profile at {s} ({s}): the runtime's own is used\n", .{ path, @errorName(err) });
         buf[0] = 0; // an empty folder: WebView2 picks its default
-    };    if (window.app.debug) std.debug.print("nanoui: WebView2 profile '{s}'\n", .{path});
+    };
+    if (window.app.debug) std.debug.print("nanoui: WebView2 profile '{s}'\n", .{path});
     return buf[0..n :0];
 }
 

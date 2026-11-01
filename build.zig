@@ -282,11 +282,15 @@ fn webview2Sdk(b: *std.Build) ?[]const u8 {
         defer dir.close(b.graph.io);
         var it = dir.iterate();
         var best: ?[]const u8 = null;
+        var best_version: ?[]const u8 = null;
         while (it.next(b.graph.io) catch null) |e| {
             if (e.kind != .directory) continue;
             const native = b.pathJoin(&.{ cache, b.dupe(e.name), "build", "native", dir_name });
             if (!hasLoader(b, native)) continue;
-            if (best == null or std.mem.order(u8, best.?, native) == .lt) best = b.dupe(native);
+            if (best_version == null or versionNewer(e.name, best_version.?)) {
+                best_version = b.dupe(e.name);
+                best = b.dupe(native);
+            }
         }
         if (best) |found| return found;
     }
@@ -296,6 +300,20 @@ fn webview2Sdk(b: *std.Build) ?[]const u8 {
     }
     std.log.warn("nanoui: no WebView2 SDK: pages can't be linked (pass -Dwebview2-sdk=<build/native/<arch>>)", .{});
     return null;
+}
+
+/// One dotted version after another ("1.0.4191.47"), numerically. A string
+/// compare would put 1.0.99 ahead of 1.0.4191.
+fn versionNewer(a: []const u8, b: []const u8) bool {
+    var ia = std.mem.splitScalar(u8, a, '.');
+    var ib = std.mem.splitScalar(u8, b, '.');
+    while (true) {
+        const x = ia.next() orelse return false; // a ended: not newer
+        const y = ib.next() orelse return true; // b ended, a went on: newer
+        const nx = std.fmt.parseInt(u32, x, 10) catch return false;
+        const ny = std.fmt.parseInt(u32, y, 10) catch return false;
+        if (nx != ny) return nx > ny;
+    }
 }
 
 fn hasLoader(b: *std.Build, dir: []const u8) bool {

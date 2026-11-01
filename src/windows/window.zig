@@ -1,5 +1,5 @@
 //! Windows on Windows: a top-level window showing native UI drawn by
-//! nanoui. Pages (WebView2) are not supported yet.
+//! nanoui, or a page drawn by WebView2 (`page_webview2.zig`).
 const std = @import("std");
 const w = @import("win32.zig");
 const App = @import("app.zig").App;
@@ -12,6 +12,8 @@ const Page = @import("../page_webview2.zig").Page;
 pub const WM_NANOUI_FLUSH: u32 = w.WM_APP + 0x4000;
 /// The menu that asks a page for its controller once its environment is up.
 pub const WM_NANOUI_CONTROLLER: u32 = w.WM_APP + 0x4001;
+/// An encoded event from any thread (`sendOwned`), the message on board.
+pub const WM_NANOUI_JOB: u32 = w.WM_APP + 0x4002;
 
 /// Asks the window to run its page's queued messages once the loop turns.
 pub fn postFlush(hwnd: w.HWND) void {
@@ -21,14 +23,6 @@ pub fn postFlush(hwnd: w.HWND) void {
 /// Asks the window to make its page's controller on the loop's next turn.
 pub fn postController(hwnd: w.HWND) void {
     _ = w.PostMessageW(hwnd, WM_NANOUI_CONTROLLER, 0, 0);
-}
-
-/// The menu that frees a page once WebView2 is done with it.
-pub const WM_NANOUI_FREE: u32 = w.WM_APP + 0x4002;
-
-/// Frees a page's handlers and the page itself on the loop's next turn.
-pub fn postFree(hwnd: w.HWND, page: *anyopaque) void {
-    _ = w.PostMessageW(hwnd, WM_NANOUI_FREE, @intFromPtr(page), 0);
 }
 const ui = @import("../ui/ui.zig");
 
@@ -182,7 +176,8 @@ pub const Window = struct {
             self.destroyNow();
             return 0;
         }
-        if (msg == w.WM_GETMINMAXINFO) {            const mm: *w.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
+        if (msg == w.WM_GETMINMAXINFO) {
+            const mm: *w.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
             const s = self.dpiScale();
             mm.pt_min_track_size = .{ .x = @intFromFloat(@max(0, self.min_width) * s), .y = @intFromFloat(@max(0, self.min_height) * s) };
             // A borderless window maximises over the whole monitor, taskbar
@@ -225,11 +220,13 @@ pub const Window = struct {
             if (self.page) |p| p.makeController();
             return 0;
         }
-        if (msg == WM_NANOUI_FREE) {
-            // The page closed while this turn was in flight: its handlers and
-            // its own memory go now that WebView2 has finished with them.
-            const p: *Page = @ptrFromInt(wp);
-            p.freeNow();
+        if (msg == WM_NANOUI_JOB) {
+            // An event some thread encoded: into the page's outbox, and the
+            // message with it.
+            const job: *SendJob = @ptrFromInt(wp);
+            defer self.app.gpa.destroy(job);
+            defer self.app.gpa.free(job.msg);
+            if (self.page) |p| p.enqueue(job.msg, true);
             return 0;
         }
         if (self.page) |p| {
@@ -469,7 +466,24 @@ pub const Window = struct {
         p.load(p.queue.options.pages[i].url);
     }
 
-    pub fn nativeView(self: *Window) ?NativeView {        const v = self.view orelse return null;
+    const SendJob = struct { msg: []u8 };
+
+    /// Queues an encoded message for the page and takes ownership of it.
+    /// Safe from any thread: the message is posted to the window's own
+    /// queue, so the outbox is only ever touched on the UI thread, where
+    /// the page lives.
+    pub fn sendOwned(self: *Window, msg: []u8) void {
+        const hwnd = self.hwnd orelse return self.app.gpa.free(msg);
+        const job = self.app.gpa.create(SendJob) catch return self.app.gpa.free(msg);
+        job.* = .{ .msg = msg };
+        if (w.PostMessageW(hwnd, WM_NANOUI_JOB, @intFromPtr(job), 0) == 0) {
+            self.app.gpa.free(msg);
+            self.app.gpa.destroy(job);
+        }
+    }
+
+    pub fn nativeView(self: *Window) ?NativeView {
+        const v = self.view orelse return null;
         if (self.surface) |s| if (s.size.w > 0) return .{ .view = v, .width = s.size.w, .height = s.size.h, .scale = s.scale, .theme = self.theme };
         return .{ .view = v, .width = @floatCast(self.width), .height = @floatCast(self.height), .scale = @floatCast(self.dpiScale()), .theme = self.theme };
     }

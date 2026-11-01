@@ -112,6 +112,15 @@ pub fn ipc(comptime Window: type, comptime App: type) type {
             v: ?[]const u8 = null,
         };
 
+        /// The id a page sent, whole and in range. It is whatever JSON had —
+        /// a remote page's too, since the bar loads the web — and the casts
+        /// below must not trap on `1e300` or `NaN`.
+        fn pageId(id: f64) u64 {
+            if (!std.math.isFinite(id) or id < 0) return 0;
+            // f64 keeps integers only up to 2^53; past that JSON says little.
+            return @intFromFloat(@min(id, 9007199254740992.0));
+        }
+
         /// Handles one message from a page, on the main thread.
         pub fn handleMessage(window: *Window, body: []const u8) void {
             const app = window.app;
@@ -125,7 +134,7 @@ pub fn ipc(comptime Window: type, comptime App: type) type {
             const page = window.page orelse return;
             if (std.mem.eql(u8, env.t, "call")) {
                 var aw: std.Io.Writer.Allocating = .init(a);
-                aw.writer.print("{{\"t\":\"reply\",\"id\":{d},", .{@as(u64, @intFromFloat(env.id))}) catch return;
+                aw.writer.print("{{\"t\":\"reply\",\"id\":{d},", .{pageId(env.id)}) catch return;
                 const mark = aw.written().len;
                 callMethod(app, window, a, env.m, env.a, &aw.writer) catch |err| {
                     aw.shrinkRetainingCapacity(mark);
@@ -142,7 +151,7 @@ pub fn ipc(comptime Window: type, comptime App: type) type {
                 page.domReady();
             } else if (std.mem.eql(u8, env.t, "page")) {
                 // The bar in the page asked for one of the app's pages.
-                window.showPage(@intFromFloat(env.id));
+                window.showPage(@intCast(pageId(env.id)));
             } else if (std.mem.eql(u8, env.t, "log")) {
                 std.debug.print("page: {s}\n", .{env.v orelse ""});
             } else if (std.mem.eql(u8, env.t, "drag")) {
