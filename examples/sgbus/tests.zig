@@ -11,6 +11,7 @@ test {
     _ = @import("onemap.zig");
     _ = @import("tests_rail.zig");
     _ = @import("text.zig");
+    _ = @import("nextbus.zig");
 }
 
 test "fares follow LTA's table from 27 December 2025" {

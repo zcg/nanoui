@@ -16,6 +16,7 @@ const about = @import("about.zig");
 const omv = @import("onemap_view.zig");
 const onboarding = @import("onboarding.zig");
 const nav = @import("nav.zig");
+const nextbus = @import("nextbus.zig");
 const nav_view = @import("nav_view.zig");
 
 pub const Tab = enum { nearby, starred, journey, about };
@@ -195,6 +196,10 @@ pub const App = struct {
     /// Folded, on a trip's legs: Go, pinned where the tab bar was.
     fn goBar(s: *App, c: *ui.Context, box: ui.Rect, sa: ui.Edges) void {
         const w = box.w - 32 - sa.left - sa.right;
+        // On a solid strip of the ground, so the list doesn't show
+        // through around it as it scrolls under.
+        const strip_h: f32 = 56 + @max(sa.bottom, 12) + 4 + 12;
+        ui.div(c).absolute().offset(0, box.h - strip_h).w(box.w).h(strip_h).bg(cards.ground).end();
         const bar = ui.div(c).absolute().offset(16 + sa.left, box.h - 56 - @max(sa.bottom, 12) - 4).w(w);
         defer bar.end();
         @import("journey_view.zig").goButton(s, c);
@@ -335,6 +340,14 @@ pub fn main(init: std.process.Init) !void {
     // At run time only: never stored, printed or bundled.
     s.journey.token = init.environ_map.get("ONEMAP_TOKEN");
     s.journey.io = init.io;
+    s.live.io = init.io;
+    // SGBUS_CLOCK="10:00" or "10:00,03:00" (Simulator only): set the
+    // clock, and jump to the second time when nav starts.
+    if (init.environ_map.get("SGBUS_CLOCK")) |v| {
+        var it = std.mem.splitScalar(u8, v, ',');
+        if (nextbus.parseHm(it.next() orelse "")) |t| s.live.setClock(t);
+        if (it.next()) |j| s.live.jump = nextbus.parseHm(j);
+    }
     s.journey.sample = init.environ_map.get("SGBUS_ONEMAP_SAMPLE") != null;
     // SGBUS_FRESH: start with no stars, as on a first launch (for a
     // scripted playthrough that stars a stop itself).

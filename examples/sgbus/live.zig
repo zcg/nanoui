@@ -3,6 +3,7 @@
 //! wants it and again every 20 seconds while it is still wanted.
 const std = @import("std");
 const nanoui = @import("nanoui");
+const nextbus = @import("nextbus.zig");
 
 pub const Load = enum { sea, sda, lsd, unknown };
 
@@ -54,6 +55,11 @@ pub const Board = struct {
     }
 
     /// Minutes to bus `i` of `s` as of now (floored; can be negative).
+    /// Minutes to `bus` as of now, unrounded.
+    pub fn minutesF(b: *const Board, bus: Bus) f64 {
+        return (@as(f64, @floatFromInt(bus.ms)) - (b.live.now - b.at) * 1000) / 60000;
+    }
+
     pub fn minutes(b: *const Board, bus: Bus) i64 {
         const left: f64 = @as(f64, @floatFromInt(bus.ms)) - (b.live.now - b.at) * 1000;
         return @intFromFloat(@floor(left / 60000));
@@ -75,6 +81,12 @@ pub const Live = struct {
     answers: u32 = 0,
     /// Today as OneMap wants it (MM-DD-YYYY), from an answer's times.
     date: ?[10]u8 = null,
+    /// The phone's clock: the time of day comes from here, not a board.
+    io: ?std.Io = null,
+    /// Seconds added to the phone's clock (SGBUS_CLOCK, for the Simulator).
+    offset: f64 = 0,
+    /// SGBUS_CLOCK's second time: the clock jumps there when nav starts.
+    jump: ?f64 = null,
 
     pub fn deinit(l: *Live) void {
         for (l.boards.items) |b| {
@@ -115,8 +127,25 @@ pub const Live = struct {
         for (l.boards.items) |b| if (l.now - b.wanted < 30) l.fetch(b);
     }
 
-    /// The wall clock, seconds since midnight, from the latest answer.
+    /// The phone's clock in Singapore time, with SGBUS_CLOCK's offset.
+    pub fn wall(l: *const Live) ?nextbus.Clock {
+        const io = l.io orelse return null;
+        const ms = @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms);
+        const epoch: f64 = @as(f64, @floatFromInt(ms)) / 1000 + l.offset;
+        return nextbus.sgClock(epoch);
+    }
+
+    /// Sets the clock to `secs` since midnight from now on.
+    pub fn setClock(l: *Live, secs: f64) void {
+        l.offset = 0;
+        const w = l.wall() orelse return;
+        l.offset = secs - w.secs;
+    }
+
+    /// The wall clock, seconds since midnight: the phone's, else the
+    /// latest answer's.
     pub fn clock(l: *const Live) ?f64 {
+        if (l.wall()) |w| return w.secs;
         var best: ?*const Board = null;
         for (l.boards.items) |b| if (b.clock != null and (best == null or b.at > best.?.at)) {
             best = b;

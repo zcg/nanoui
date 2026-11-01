@@ -9,6 +9,7 @@ const data = @import("data.zig");
 const raptor = @import("raptor.zig");
 const cards = @import("cards.zig");
 const navm = @import("nav.zig");
+const nextbus = @import("nextbus.zig");
 const App = @import("main.zig").App;
 
 const ink = cards.ink;
@@ -52,7 +53,12 @@ pub fn view(s: *App, c: *ui.Context, wide: bool) void {
     current(s, c, nv.cur, ty);
     if (nv.cur + 1 < nv.steps.items.len) {
         ui.text(c, "Then", .{ .size = 13, .weight = .semibold, .color = gray });
-        later(s, c, nv.cur + 1, 17);
+        // The next buses go on the Then card while you walk towards a
+        // stop, unless the card above already has them.
+        const nx = nv.steps.items[nv.cur + 1];
+        const here_has = waitsFor(s, nv.steps.items[nv.cur]);
+        const times: ?u8 = if (waitsFor(s, nx) != null and (here_has == null or here_has.? != nx.leg)) nx.leg else null;
+        later(s, c, nv.cur + 1, 17, times);
     }
     if (wide and nv.cur + 2 < nv.steps.items.len) {
         ui.text(c, "After that", .{ .size = 13, .weight = .semibold, .color = gray });
@@ -81,13 +87,101 @@ fn current(s: *App, c: *ui.Context, k: usize, ty: Type) void {
     ui.text(c, title(s, c, st, true), .{ .size = ty.title, .weight = .semibold, .color = ink, .wrap = true });
     const sub = subText(s, c, st);
     if (sub.len > 0) ui.text(c, sub, .{ .size = ty.sub, .color = gray, .wrap = true });
+    if (waitsFor(s, st)) |leg| nextOnes(s, c, leg, ty.sub);
 }
 
-/// The next step, on its own card.
-fn later(s: *App, c: *ui.Context, k: usize, size: f32) void {
-    const card = ui.div(c).column().wFull().rounded(22).bg(.white).p(16);
+/// The next step, on its own card, with the next buses or trains for
+/// ride `times` when it has them.
+fn later(s: *App, c: *ui.Context, k: usize, size: f32, times: ?u8) void {
+    const card = ui.div(c).column().wFull().rounded(22).bg(.white).p(16).gap(10);
     defer card.end();
     row(s, c, k, size);
+    if (times) |leg| nextOnes(s, c, leg, 15);
+}
+
+/// The ride a step waits for: walking to its stop, or at it, not yet on.
+fn waitsFor(s: *App, st: navm.Step) ?u8 {
+    return switch (st.kind) {
+        .to_stop => st.leg,
+        .ride => if (s.nav.onBoard(st.leg, s.here)) null else st.leg,
+        else => null,
+    };
+}
+
+/// Minutes' walk left to ride `leg`'s stop (none once you're at it).
+fn walkLeft(s: *App, leg: u8) f64 {
+    const m = data.meters(s.here, s.nav.ends(leg)[1]);
+    return if (m < 25) 0 else raptor.walkMin(m);
+}
+
+/// The next buses at the stop, live, or the trains, estimated.
+fn nextOnes(s: *App, c: *ui.Context, leg: u8, size: f32) void {
+    const nv = &s.nav;
+    const r = nv.trip.rides[leg];
+    const sv = s.d.services[r.svc];
+    const walk = walkLeft(s, leg);
+    const box = ui.div(c).column().wFull().gap(8).p(12).rounded(16).bg(cards.ground);
+    defer box.end();
+    if (sv.rail) |l| return nextTrains(s, c, l, walk, size);
+    const code = s.d.stops[nv.boardStop(leg)].code;
+    const b = s.live.want(code) orelse return ui.text(c, "No live times", .{ .size = size, .color = gray });
+    if (b.state == .loading) return ui.text(c, "Getting live times...", .{ .size = size, .color = gray });
+    var m: nextbus.Mins = .{ null, null, null };
+    var buses: [3]?@import("live.zig").Bus = .{ null, null, null };
+    if (b.state == .ok) if (b.find(sv.no)) |x| for (x.buses, 0..) |bus, k| if (bus) |y| {
+        m[k] = b.minutesF(y);
+        buses[k] = y;
+    };
+    if (nextbus.count(m) == 0) return ui.text(c, "No live times", .{ .size = size, .weight = .semibold, .color = ink });
+    var lb: [96]u8 = undefined;
+    ui.text(c, c.print("{s}", .{nextbus.line(&lb, sv.no, m)}), .{ .size = size + 2, .weight = .semibold, .color = ink, .tabular = true, .wrap = true });
+    const k = nextbus.catchable(m, walk);
+    {
+        const chips = ui.div(c).row().gap(8).itemsCenter();
+        defer chips.end();
+        for (buses, 0..) |bus, i| if (bus) |y| if (m[i].? > -1) {
+            c.next_key_int = i;
+            const on = k != null and k.? == i;
+            const missed = k == null or i < k.?;
+            const ch = ui.div(c).row().gap(6).itemsCenter().px(10).py(6).rounded(12).bg(if (on) ink else .white);
+            var tb: [16]u8 = undefined;
+            ui.text(c, c.print("{s}", .{nextbus.one(&tb, m[i].?)}), .{ .size = 15, .weight = .semibold, .tabular = true, .color = if (on) .white else if (missed) gray else ink });
+            cards.loadBars(c, y.load);
+            if (!y.wab) ui.text(c, "no ramp", .{ .size = 13, .color = if (on) .white else gray });
+            ch.end();
+        };
+    }
+    var mb: [128]u8 = undefined;
+    if (nextbus.missLine(&mb, m, walk)) |t| ui.text(c, c.print("{s}", .{t}), .{ .size = size, .weight = .semibold, .color = cards.red, .wrap = true });
+    ui.text(c, "Live from LTA, every 20 s", .{ .size = 13, .color = gray });
+}
+
+/// Trains by the phone's clock: about every N min (not live), or none
+/// until the first train.
+fn nextTrains(s: *App, c: *ui.Context, l: *const data.Line, walk: f64, size: f32) void {
+    var now = s.journey.planNow();
+    const clock = now.clock orelse {
+        ui.text(c, c.print("A train about every {d} min", .{@as(u32, @intFromFloat(@round(raptor.rail.headway(l, true))))}), .{ .size = size + 2, .weight = .semibold, .color = ink });
+        return ui.text(c, "Estimated from timetables, not live", .{ .size = 13, .color = gray });
+    };
+    // When you'll be on the platform.
+    const at = clock + (walk + raptor.rail.entry_min) * 60;
+    now.clock = at;
+    var hb: [8]u8 = undefined;
+    switch (nextbus.trains(l, at, raptor.isPeak(now))) {
+        .every => |h| {
+            ui.text(c, c.print("A train about every {d} min", .{@as(u32, @intFromFloat(@round(h)))}), .{ .size = size + 2, .weight = .semibold, .color = ink });
+            ui.text(c, "Estimated from timetables, not live", .{ .size = 13, .color = gray });
+        },
+        .closed => |f| {
+            const now_open = nextbus.trains(l, clock, false) == .every;
+            if (now_open) {
+                ui.text(c, c.print("Last train about {s}: you may miss it", .{nextbus.hm(&hb, raptor.rail.last_min)}), .{ .size = size + 2, .weight = .semibold, .color = cards.red, .wrap = true });
+            } else ui.text(c, c.print("No trains now, first train about {s}", .{nextbus.hm(&hb, f)}), .{ .size = size + 2, .weight = .semibold, .color = cards.red, .wrap = true });
+            var hb2: [8]u8 = undefined;
+            ui.text(c, c.print("Trains run about {s} to {s}. Check for a night bus.", .{ nextbus.hm(&hb2, f), nextbus.hm(&hb, raptor.rail.last_min) }), .{ .size = 13, .color = gray, .wrap = true });
+        },
+    }
 }
 
 fn row(s: *App, c: *ui.Context, k: usize, size: f32) void {

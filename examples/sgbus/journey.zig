@@ -169,7 +169,7 @@ pub const Journey = struct {
     pub fn planNow(j: *const Journey) raptor.Now {
         const s = j.app;
         var n: raptor.Now = .{ .ctx = s, .look = look, .clock = s.live.clock() };
-        if (s.live.date) |d| n.weekday = weekday(&d);
+        if (s.live.wall()) |w| n.weekday = w.weekday else if (s.live.date) |d| n.weekday = weekday(&d);
         return n;
     }
 
