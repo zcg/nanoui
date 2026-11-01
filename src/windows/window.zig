@@ -5,6 +5,31 @@ const w = @import("win32.zig");
 const App = @import("app.zig").App;
 const Surface = @import("surface.zig").Surface;
 const window_types = @import("../window_types.zig");
+const Page = @import("../page_webview2.zig").Page;
+
+/// The window message a page's queued messages go out on (`Page.flush`):
+/// after the app's own (`WM_APP` onwards, as `fdwatch.zig` allocates them).
+pub const WM_NANOUI_FLUSH: u32 = w.WM_APP + 0x4000;
+/// The menu that asks a page for its controller once its environment is up.
+pub const WM_NANOUI_CONTROLLER: u32 = w.WM_APP + 0x4001;
+
+/// Asks the window to run its page's queued messages once the loop turns.
+pub fn postFlush(hwnd: w.HWND) void {
+    _ = w.PostMessageW(hwnd, WM_NANOUI_FLUSH, 0, 0);
+}
+
+/// Asks the window to make its page's controller on the loop's next turn.
+pub fn postController(hwnd: w.HWND) void {
+    _ = w.PostMessageW(hwnd, WM_NANOUI_CONTROLLER, 0, 0);
+}
+
+/// The menu that frees a page once WebView2 is done with it.
+pub const WM_NANOUI_FREE: u32 = w.WM_APP + 0x4002;
+
+/// Frees a page's handlers and the page itself on the loop's next turn.
+pub fn postFree(hwnd: w.HWND, page: *anyopaque) void {
+    _ = w.PostMessageW(hwnd, WM_NANOUI_FREE, @intFromPtr(page), 0);
+}
 const ui = @import("../ui/ui.zig");
 
 pub const Asset = window_types.Asset;
@@ -35,6 +60,8 @@ pub const Window = struct {
     closed: bool = false,
     full_screen: bool = false,
     view: ?ui.View = null,
+    /// The page, when the window shows one instead of native UI.
+    page: ?*Page = null,
     width: f64 = 0,
     height: f64 = 0,
     theme: ?ui.Theme = null,
@@ -48,8 +75,10 @@ pub const Window = struct {
         const self = try app.gpa.create(Window);
         errdefer app.gpa.destroy(self);
         self.* = .{ .app = app, .title_bar = options.title_bar, .on_close = options.on_close, .should_close = options.should_close, .on_resize = options.on_resize, .on_key = options.on_key, .on_fullscreen = options.on_fullscreen, .width = options.width, .height = options.height, .theme = options.theme, .min_width = options.min_width, .min_height = options.min_height, .opacity = options.opacity };
+        // A page is made once the window it fills exists, below.
+        var page_options: ?PageOptions = null;
         switch (options.content) {
-            .page => return error.PagesUnsupported,
+            .page => |p| page_options = p,
             .view => |v| self.view = v,
         }
         if (!app.gui) return self;
@@ -59,8 +88,10 @@ pub const Window = struct {
             if (w.RegisterClassExW(&wc) == 0) return error.RegisterClass;
             registered = true;
         }
-        self.surface = try Surface.create(self, self.view.?, options.theme);
-        errdefer if (self.surface) |s| s.destroy();
+        if (self.view) |view| {
+            self.surface = try Surface.create(self, view, options.theme);
+            errdefer if (self.surface) |s| s.destroy();
+        }
         var title: [512]u16 = undefined;
         // A borderless window is `WS_POPUP`: no title bar, no frame, and the
         // client area is the whole window. `WS_OVERLAPPEDWINDOW` otherwise, which
@@ -83,6 +114,21 @@ pub const Window = struct {
         // needs `WS_EX_LAYERED` to have been set when it was made — or set just
         // now, which `setOpacity` does for a window that was made opaque.
         if (options.opacity < 1) self.setOpacity(options.opacity);
+        // The page is WebView2's, in the client area the window now has.
+        if (page_options) |p| {
+            if (Page.create(self, p)) |made| {
+                self.page = made;
+            } else |err| switch (err) {
+                // No runtime on this machine: the app still opens, and says
+                // what is missing where the page would have been.
+                error.WebView2Missing => {
+                    std.log.warn("nanoui: no WebView2 for this window: showing a notice instead", .{});
+                    self.view = fallbackView(p.url);
+                    self.surface = Surface.create(self, self.view.?, options.theme) catch null;
+                },
+                else => return err,
+            }
+        }
         if (!app.flags.hidden and options.visible) self.show();
         return self;
     }
@@ -136,8 +182,7 @@ pub const Window = struct {
             self.destroyNow();
             return 0;
         }
-        if (msg == w.WM_GETMINMAXINFO) {
-            const mm: *w.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
+        if (msg == w.WM_GETMINMAXINFO) {            const mm: *w.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
             const s = self.dpiScale();
             mm.pt_min_track_size = .{ .x = @intFromFloat(@max(0, self.min_width) * s), .y = @intFromFloat(@max(0, self.min_height) * s) };
             // A borderless window maximises over the whole monitor, taskbar
@@ -170,6 +215,27 @@ pub const Window = struct {
                 if (self.on_resize != null and ((msg == w.WM_SIZE and wp != 1 and !s.dragging) or msg == w.WM_EXITSIZEMOVE)) self.onResize();
                 return r;
             }
+        }
+        // A page's queued messages go out on the turn this message lands on.
+        if (msg == WM_NANOUI_FLUSH) {
+            if (self.page) |p| p.flush();
+            return 0;
+        }
+        if (msg == WM_NANOUI_CONTROLLER) {
+            if (self.page) |p| p.makeController();
+            return 0;
+        }
+        if (msg == WM_NANOUI_FREE) {
+            // The page closed while this turn was in flight: its handlers and
+            // its own memory go now that WebView2 has finished with them.
+            const p: *Page = @ptrFromInt(wp);
+            p.freeNow();
+            return 0;
+        }
+        if (self.page) |p| {
+            // The window moved or changed size, or the monitor's scale did:
+            // the webview covers the client area as it now is.
+            if (msg == w.WM_SIZE or msg == w.WM_EXITSIZEMOVE or msg == w.WM_DPICHANGED) p.applyBounds();
         }
         if ((msg == w.WM_SETFOCUS or msg == w.WM_KILLFOCUS) and self.on_key != null) self.onKey();
         return w.DefWindowProcW(hwnd, msg, wp, lp);
@@ -215,6 +281,10 @@ pub const Window = struct {
         if (self.closed) return;
         self.closed = true;
         if (self.on_close) |cb| cb.func(cb.ctx, self);
+        // The page first: WebView2's view is a child window, gone with its
+        // controller before the window that holds it.
+        if (self.page) |p| p.destroy();
+        self.page = null;
         if (self.surface) |s| s.destroy();
         self.surface = null;
         const app = self.app;
@@ -386,8 +456,20 @@ pub const Window = struct {
         _ = w.SetWindowTextW(h, w.wide(&buf, title));
     }
 
-    pub fn nativeView(self: *Window) ?NativeView {
-        const v = self.view orelse return null;
+    /// Points a page's window at `url`: a path from the app's assets, or an
+    /// absolute `http(s)://` one. No effect on a native-UI window.
+    pub fn setPageUrl(self: *Window, url: []const u8) void {
+        if (self.page) |p| p.load(url);
+    }
+
+    /// Shows entry `i` of `PageOptions.pages` (the bar's buttons).
+    pub fn showPage(self: *Window, i: usize) void {
+        const p = self.page orelse return;
+        if (i >= p.queue.options.pages.len) return;
+        p.load(p.queue.options.pages[i].url);
+    }
+
+    pub fn nativeView(self: *Window) ?NativeView {        const v = self.view orelse return null;
         if (self.surface) |s| if (s.size.w > 0) return .{ .view = v, .width = s.size.w, .height = s.size.h, .scale = s.scale, .theme = self.theme };
         return .{ .view = v, .width = @floatCast(self.width), .height = @floatCast(self.height), .scale = @floatCast(self.dpiScale()), .theme = self.theme };
     }
@@ -397,3 +479,26 @@ pub const Window = struct {
         std.debug.print("nanoui: window {x} frame {d} {d} {d} {d}\n", .{ @intFromPtr(self), f.x, f.y, f.width, f.height });
     }
 };
+
+/// The window's content when its page cannot be shown: no WebView2 on this
+/// machine, which the user can fix. A native view, so the window opens and
+/// says what is missing — with the download page one click away, and the
+/// address itself for anyone who'd rather read it first.
+const download_url = "https://developer.microsoft.com/microsoft-edge/webview2/";
+
+fn fallbackView(_: []const u8) ui.View {
+    const Notice = struct {
+        fn build(_: *@This(), c: *ui.Context) void {
+            const box = ui.div(c).column().center().sizeFull().gap(10).p(28);
+            defer box.end();
+            _ = ui.text(c, "This app needs Microsoft Edge WebView2", .{ .size = 18, .weight = .semibold });
+            _ = ui.text(c, "It is not installed on this PC. Install the Evergreen Runtime, then open the app again.", .{ .size = 13, .color = c.theme.muted });
+            const dl = ui.button(c, "Download WebView2", .{ .variant = .primary, .size = 14 });
+            if (dl.clicked) _ = @import("desktop.zig").shell.openUrl(download_url);
+            _ = ui.text(c, download_url, .{ .size = 11, .color = c.theme.muted });
+            const close = ui.button(c, "Close", .{ .size = 13 });
+            if (close.clicked) c.close_request = true;
+        }
+    };
+    return ui.View.init(@as(*Notice, @ptrFromInt(@alignOf(Notice))), Notice.build);
+}
