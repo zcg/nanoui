@@ -29,7 +29,7 @@ const blurbs = [pages.len][]const u8{
     "Buttons, toggles, sliders, fields",
     "A to-do list with checkboxes",
     "System text, weights, wrapping",
-    "10 000 rows, filtered live",
+    "100 000 rows, filtered live",
     "Liquid Glass bars, tabs, toasts",
     "Springs, staggers, shared elements",
     "Every nanoui.kit component",
