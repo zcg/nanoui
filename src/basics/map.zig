@@ -42,7 +42,12 @@ pub const Line = struct {
     points: []const Coord,
     color: ui.Color = .hex(0x1A73E8),
     width: f32 = 5,
+    /// Dotted, as a walk is drawn.
+    dashed: bool = false,
 };
+
+/// One line as the map keeps it: a run of `Map.line`'s points.
+pub const Seg = struct { start: u32, len: u32, color: ui.Color, width: f32, dashed: bool };
 
 pub const Camera = struct {
     center: Coord,
@@ -54,6 +59,8 @@ pub const Camera = struct {
 pub const Options = struct {
     pins: []const Pin = &.{},
     line: ?Line = null,
+    /// More lines, drawn over `line` in order (a trip's walks and rides).
+    lines: []const Line = &.{},
     /// Moves the camera when it differs from the last one given.
     camera: ?Camera = null,
     /// The device's location dot (asks nothing: start `location` for it).
@@ -86,9 +93,9 @@ pub const Map = struct {
     gpa: std.mem.Allocator,
     /// What the last frame asked for.
     pins: std.ArrayList(Want) = .empty,
+    /// Every line's points, one after another, and the runs that are lines.
     line: std.ArrayList(Coord) = .empty,
-    line_color: ui.Color = .hex(0x1A73E8),
-    line_width: f32 = 5,
+    segs: std.ArrayList(Seg) = .empty,
     camera: ?Camera = null,
     user: bool = false,
     muted: bool = true,
@@ -108,6 +115,7 @@ pub const Map = struct {
         m.native.deinit();
         m.pins.deinit(m.gpa);
         m.line.deinit(m.gpa);
+        m.segs.deinit(m.gpa);
     }
 
     /// The map, filling the box it's in.
@@ -120,12 +128,7 @@ pub const Map = struct {
             w.label_len = @intCast(n);
             m.pins.append(m.gpa, w) catch break;
         }
-        m.line.clearRetainingCapacity();
-        if (opts.line) |l| {
-            m.line.appendSlice(m.gpa, l.points) catch {};
-            m.line_color = l.color;
-            m.line_width = l.width;
-        }
+        m.setLines(opts.line, opts.lines);
         if (opts.camera) |cam| m.camera = cam;
         m.user = opts.user;
         m.muted = opts.muted;
@@ -135,6 +138,28 @@ pub const Map = struct {
             m.seen = true;
             native.want(m);
         } else placeholder(c, opts);
+    }
+
+    fn setLines(m: *Map, first: ?Line, more: []const Line) void {
+        m.line.clearRetainingCapacity();
+        m.segs.clearRetainingCapacity();
+        if (first) |l| m.addLine(l);
+        for (more) |l| m.addLine(l);
+    }
+
+    fn addLine(m: *Map, l: Line) void {
+        if (l.points.len < 2) return;
+        const start = m.line.items.len;
+        m.line.appendSlice(m.gpa, l.points) catch return;
+        m.segs.append(m.gpa, .{ .start = @intCast(start), .len = @intCast(l.points.len), .color = l.color, .width = l.width, .dashed = l.dashed }) catch {
+            m.line.shrinkRetainingCapacity(start);
+        };
+    }
+
+    /// The points of line `i`.
+    pub fn segPoints(m: *const Map, i: usize) []const Coord {
+        const sg = m.segs.items[i];
+        return m.line.items[sg.start .. sg.start + sg.len];
     }
 
     /// The pin tapped since the last call, if any.
@@ -169,6 +194,12 @@ test "a map keeps what it was asked to show, labels copied" {
         try m.pins.append(m.gpa, w);
     }
     label[0] = 'X';
+    const walk = [_]Coord{ .{ .lat = 1.30, .lng = 103.8 }, .{ .lat = 1.31, .lng = 103.8 } };
+    const ride = [_]Coord{ walk[1], .{ .lat = 1.32, .lng = 103.9 }, .{ .lat = 1.33, .lng = 103.9 } };
+    m.setLines(null, &.{ .{ .points = &walk, .dashed = true }, .{ .points = ride[0..1] }, .{ .points = &ride } });
+    try std.testing.expectEqual(@as(usize, 2), m.segs.items.len);
+    try std.testing.expect(m.segs.items[0].dashed and !m.segs.items[1].dashed);
+    try std.testing.expectEqual(@as(usize, 3), m.segPoints(1).len);
     try std.testing.expectEqualStrings("83139", m.pins.items[0].label());
     try std.testing.expect(m.takeTap() == null);
 }

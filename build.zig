@@ -5,7 +5,7 @@ pub const ios = @import("tools/ios/bundle.zig");
 /// Android APKs, likewise: `@import("nanoui").android.apk(b, lib, .{ .name = "Notes", .id = "com.example.notes" })`.
 pub const android = @import("tools/android/apk.zig");
 
-const examples = [_][]const u8{ "hello", "counter", "gallery", "duo", "board", "basics", "map", "turn", "access", "todo" };
+const examples = [_][]const u8{ "hello", "counter", "gallery", "duo", "board", "basics", "map", "turn", "access", "todo", "sgbus" };
 const frameworks = [_][]const u8{ "AppKit", "WebKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO", "UniformTypeIdentifiers", "CoreVideo" };
 const ios_frameworks = [_][]const u8{ "UIKit", "CoreLocation", "MapKit", "Metal", "QuartzCore", "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO", "UniformTypeIdentifiers", "CoreVideo" };
 
@@ -131,6 +131,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "nanoui", .module = nanoui }},
     }) })).step);
+    // The SG bus example's planner, on its real stop lists (prints what it plans).
+    const sg_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/sgbus/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nanoui", .module = nanoui }},
+    }) });
+    b.step("test-sgbus", "Test the SG bus example's journey planner").dependOn(&b.addRunArtifact(sg_tests).step);
     // The tests as a program, for another machine (Linux in a container).
     const test_bin = b.addInstallArtifact(tests, .{ .dest_sub_path = if (os == .windows) "nanoui-tests.exe" else "nanoui-tests" });
     b.step("test-bin", "Install the unit tests as zig-out/bin/nanoui-tests").dependOn(&test_bin.step);
@@ -171,7 +179,7 @@ fn addIosExample(b: *std.Build, name: []const u8, target: std.Build.ResolvedTarg
     const opts: ios.Options = .{
         .name = title,
         .id = b.fmt("dev.nanoui.{s}", .{name}),
-        .location_usage = if (std.mem.eql(u8, name, "basics") or std.mem.eql(u8, name, "map")) "The example shows where you are." else null,
+        .location_usage = if (std.mem.eql(u8, name, "basics") or std.mem.eql(u8, name, "map") or std.mem.eql(u8, name, "sgbus")) "The example shows where you are." else null,
     };
     const bundle = ios.app(b, exe, opts);
     b.getInstallStep().dependOn(&b.addInstallDirectory(.{ .source_dir = bundle, .install_dir = .prefix, .install_subdir = b.fmt("ios/{s}.app", .{title}) }).step);

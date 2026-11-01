@@ -21,7 +21,8 @@ pub const Native = struct {
     delegate: ?objc.Object = null,
     surface: ?*Surface = null,
     entries: std.ArrayList(Entry) = .empty,
-    overlay: ?objc.Object = null,
+    /// One polyline per line, in `Map.segs`' order.
+    overlays: std.ArrayList(objc.Object) = .empty,
     line_hash: u64 = 0,
     camera: ?api.Camera = null,
     shown: bool = false,
@@ -34,7 +35,8 @@ pub const Native = struct {
         unregister(m);
         for (n.entries.items) |e| objc.release(e.ann);
         n.entries.deinit(m.gpa);
-        if (n.overlay) |o| objc.release(o);
+        for (n.overlays.items) |o| objc.release(o);
+        n.overlays.deinit(m.gpa);
         if (n.view) |v| {
             objc.msg(void, v, "setDelegate:", .{@as(?objc.Object, null)});
             objc.msg(void, v, "removeFromSuperview", .{});
@@ -193,29 +195,33 @@ fn glide(ann: objc.Object, to: Coordinate) void {
     objc.msg(void, objc.class("UIView"), "animateWithDuration:animations:", .{ @as(f64, 1.0), @as(*anyopaque, @ptrCast(&block)) });
 }
 
-/// The route's polyline, replaced when its points change.
+/// The lines' polylines, replaced when their points or looks change.
 fn line(m: *api.Map, v: objc.Object) void {
     const n = &m.native;
     var h = std.hash.Wyhash.init(0);
     h.update(std.mem.sliceAsBytes(m.line.items));
-    h.update(std.mem.asBytes(&m.line_color));
-    h.update(std.mem.asBytes(&m.line_width));
+    h.update(std.mem.sliceAsBytes(m.segs.items));
     const hash = h.final();
     if (hash == n.line_hash) return;
     n.line_hash = hash;
-    if (n.overlay) |o| {
+    for (n.overlays.items) |o| {
         objc.msg(void, v, "removeOverlay:", .{o});
         objc.release(o);
-        n.overlay = null;
     }
-    if (m.line.items.len < 2) return;
-    const coords = m.gpa.alloc(Coordinate, m.line.items.len) catch return;
-    defer m.gpa.free(coords);
-    for (m.line.items, coords) |p, *c| c.* = .{ .lat = p.lat, .lng = p.lng };
-    const poly = objc.retain(objc.msg(objc.Object, objc.class("MKPolyline"), "polylineWithCoordinates:count:", .{ @as(*const anyopaque, coords.ptr), @as(objc.NSUInteger, coords.len) }));
-    n.overlay = poly;
-    // Above roads (0), under the labels.
-    objc.msg(void, v, "addOverlay:level:", .{ poly, @as(objc.NSInteger, 0) });
+    n.overlays.clearRetainingCapacity();
+    for (0..m.segs.items.len) |i| {
+        const pts = m.segPoints(i);
+        const coords = m.gpa.alloc(Coordinate, pts.len) catch return;
+        defer m.gpa.free(coords);
+        for (pts, coords) |p, *c| c.* = .{ .lat = p.lat, .lng = p.lng };
+        const poly = objc.retain(objc.msg(objc.Object, objc.class("MKPolyline"), "polylineWithCoordinates:count:", .{ @as(*const anyopaque, coords.ptr), @as(objc.NSUInteger, coords.len) }));
+        n.overlays.append(m.gpa, poly) catch {
+            objc.release(poly);
+            return;
+        };
+        // Above roads (0), under the labels; later lines over earlier ones.
+        objc.msg(void, v, "addOverlay:level:", .{ poly, @as(objc.NSInteger, 0) });
+    }
 }
 
 fn uiColor(c: types.Color) objc.Object {
@@ -241,7 +247,9 @@ fn style(av: objc.Object, w: *const api.Want) void {
     const wid = @max(fit.size.width + 12, hgt);
     const rect: objc.CGRect = .{ .size = .{ .width = wid, .height = hgt } };
     objc.msg(void, lbl, "setFrame:", .{rect});
-    objc.msg(void, av, "setFrame:", .{rect});
+    // Bounds, not frame: a frame at 0, 0 would take the pin to the map's
+    // top left corner until MapKit placed it again.
+    objc.msg(void, av, "setBounds:", .{rect});
     const layer = objc.msg(objc.Object, lbl, "layer", .{});
     objc.msg(void, layer, "setCornerRadius:", .{if (bus) hgt / 2 else @as(objc.CGFloat, 6)});
     objc.msg(void, layer, "setMasksToBounds:", .{objc.YES});
@@ -291,8 +299,22 @@ fn rendererFor(obj: objc.Object, _: objc.SEL, _: objc.Object, overlay: objc.Obje
     const m = objc.getZig(api.Map, obj) orelse return null;
     const r = objc.msg(objc.Object, objc.alloc("MKPolylineRenderer"), "initWithPolyline:", .{overlay});
     objc.autorelease(r);
-    objc.msg(void, r, "setStrokeColor:", .{uiColor(m.line_color)});
-    objc.msg(void, r, "setLineWidth:", .{@as(objc.CGFloat, m.line_width)});
+    var seg: api.Seg = .{ .start = 0, .len = 0, .color = .hex(0x1A73E8), .width = 5, .dashed = false };
+    for (m.native.overlays.items, 0..) |o, i| if (o == overlay and i < m.segs.items.len) {
+        seg = m.segs.items[i];
+    };
+    objc.msg(void, r, "setStrokeColor:", .{uiColor(seg.color)});
+    objc.msg(void, r, "setLineWidth:", .{@as(objc.CGFloat, seg.width)});
+    if (seg.dashed) {
+        // Round dots, as Apple Maps draws a walk.
+        objc.msg(void, r, "setLineCap:", .{@as(c_int, 1)});
+        const nums = [_]objc.Object{
+            objc.msg(objc.Object, objc.class("NSNumber"), "numberWithDouble:", .{@as(f64, 0.1)}),
+            objc.msg(objc.Object, objc.class("NSNumber"), "numberWithDouble:", .{@as(f64, @max(8, seg.width * 2))}),
+        };
+        const arr = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObjects:count:", .{ @as(*const anyopaque, @ptrCast(&nums)), @as(objc.NSUInteger, nums.len) });
+        objc.msg(void, r, "setLineDashPattern:", .{arr});
+    }
     return r;
 }
 

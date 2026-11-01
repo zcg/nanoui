@@ -89,6 +89,8 @@ pub const location = @import("basics/location.zig");
 pub const kv = @import("basics/kv.zig");
 /// A map: MapKit under the UI on iOS, a placeholder elsewhere.
 pub const map = @import("basics/map.zig");
+/// Walking directions (iOS, MapKit's MKDirections).
+pub const directions = @import("basics/directions.zig");
 /// Components after GPUI Kit: buttons, overlays, tabs, forms, toasts.
 pub const kit = @import("kit/kit.zig");
 pub const tsgen = @import("tsgen.zig");
@@ -143,6 +145,7 @@ test {
     _ = haptics;
     _ = location;
     _ = map;
+    _ = directions;
     _ = kv;
     // The updater is for desktop apps; iOS updates through the App Store.
     if (builtin.os.tag != .ios) _ = @import("update_portable.zig");
