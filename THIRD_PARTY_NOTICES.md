@@ -83,3 +83,7 @@ Direct2D text compositing. The MIT license is kept verbatim in
 repositories with their own licenses and notices. Both use CodeGraff's
 colors and run graff as a separate program; CodeGraff is distributed under
 its modified AGPLv3 terms, as their notices say.
+
+## Stageshow (.agents/skills/stageshow)
+
+Agent skill by Benji Taylor, MIT. Source: https://github.com/benjitaylor/skills/tree/802057409787133703c56001080169e347305572/stageshow. App icons and brand assets inside keep their own licenses; see that folder's NOTICE.md and kit/brands/SOURCES.md.
