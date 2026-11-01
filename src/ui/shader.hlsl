@@ -47,15 +47,17 @@ struct Instance {
     float  border_width; // blur radius for shadows
     float  kind;
     float  clip_round;   // corners * 4096 + radius (gpu.zig's clipRound)
-    // These three are declared to keep the stride at 144 bytes, which is what
+    // These are declared to keep the stride at 160 bytes, which is what
     // gpu.zig's `Instance` is. Without them the structured buffer steps 96 bytes
     // per element and every instance after the first reads another's fields --
     // which showed up as the D3D11/CPU parity tests failing, not as an obvious
-    // misdraw. They are unused here; motion is animated on the CPU and arrives
-    // already baked into `rect`, `color` and `uv`.
+    // misdraw. Motion is animated on the CPU and arrives already baked into
+    // `rect`, `color` and `uv`; of these only the faces (`vel.zw`) and the
+    // turn are read here, as shader.glsl reads them.
     float4 xf;           // angle0 rad, spin rad/s, pivot x, pivot y
     float4 pulse;        // period s, scale_amp, alpha_low, unused
-    float4 vel;          // blur vector x, y in points, unused, unused
+    float4 vel;          // blur vector x, y in points, face, mirror x
+    float4 turn;         // angle about the vertical axis, eye distance, pivot x, pivot y
 };
 
 StructuredBuffer<Instance> instances : register(t0);
@@ -100,9 +102,26 @@ Varyings quad_vs(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
         // The triangle itself: its third corner twice.
         p = vid == 0 ? a.uv.xy : (vid == 1 ? a.uv.zw : a.border_color.xy);
     }
+    float2 local = p - a.rect.xy;
+    // The reverse of a card is seen through it: mirrored across its middle.
+    if (a.vel.z == 2.0 && a.kind != 6.0 && a.kind != 7.0) p.x = 2.0 * a.vel.w - p.x;
+    // A turn about the vertical axis through the pivot, in perspective.
+    float2 seen = p;
+    float w = 1.0;
+    float ct = cos(a.turn.x);
+    bool hidden = (a.vel.z == 1.0 && ct < 0.0) || (a.vel.z == 2.0 && ct >= 0.0);
+    if (a.turn.x != 0.0) {
+        float dx = p.x - a.turn.z;
+        float z = -dx * sin(a.turn.x);
+        seen = float2(a.turn.z + dx * ct, p.y);
+        if (a.turn.y > 0.0) {
+            w = max(1.0 - z / a.turn.y, 0.1);
+            seen = a.turn.zw + (seen - a.turn.zw) / w;
+        }
+    }
     Varyings o;
-    o.pos = float4(p / viewport * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-    o.v_local = p - a.rect.xy;
+    o.pos = hidden ? float4(0.0, 0.0, 0.0, 1.0) : float4((seen / viewport * float2(2.0, -2.0) + float2(-1.0, 1.0)) * w, 0.0, w);
+    o.v_local = local;
     o.v_world = p;
     o.v_uv = lerp(a.uv.xy, a.uv.zw, corner);
     o.i_rect = a.rect;
